@@ -3,7 +3,7 @@
 //
 // Запуск (внутри контейнера бота, где есть PHPBOT_* env и доступ к db):
 //
-//	import-history -file /tmp/messages.json [-chat-id <id>] [-workers 4]
+//	import-history -file /tmp/result.json [-chat-id <id>] [-batch 32]
 package main
 
 import (
@@ -13,10 +13,9 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"sync"
-	"sync/atomic"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/pgvector/pgvector-go"
 
 	"phpbot/internal/db"
 	"phpbot/internal/importer"
@@ -25,13 +24,13 @@ import (
 )
 
 func main() {
-	filePath := flag.String("file", "", "путь к messages.json (экспорт Telegram Desktop)")
+	filePath := flag.String("file", "", "путь к result.json (экспорт Telegram Desktop)")
 	chatID := flag.Int64("chat-id", envChatID("PHPBOT_CHAT_ID", 0), "id целевого чата (или PHPBOT_CHAT_ID)")
-	workers := flag.Int("workers", 4, "число параллельных embedding-воркеров")
+	batch := flag.Int("batch", 32, "размер батча для embedding (текстов за один API-вызов)")
 	flag.Parse()
 
 	if *filePath == "" || *chatID == 0 {
-		fmt.Fprintln(os.Stderr, "использование: import-history -file <messages.json> [-chat-id N] [-workers 4]")
+		fmt.Fprintln(os.Stderr, "использование: import-history -file <result.json> [-chat-id N] [-batch 32]")
 		os.Exit(2)
 	}
 
@@ -64,10 +63,9 @@ func main() {
 	repo := messages.New(dbx)
 
 	before := countMsgs(ctx, dbx, *chatID)
-	for _, m := range msgs {
-		mm := m // избегаем захвата loop-переменной
-		if err := repo.Save(ctx, &mm); err != nil {
-			slog.Warn("save message", "id", m.ID, "err", err)
+	for i := range msgs {
+		if err := repo.Save(ctx, &msgs[i]); err != nil {
+			slog.Warn("save message", "id", msgs[i].ID, "err", err)
 		}
 	}
 	after := countMsgs(ctx, dbx, *chatID)
@@ -78,42 +76,63 @@ func main() {
 		os.Getenv("PHPBOT_LLM_API_KEY"),
 		envOr("PHPBOT_EMBED_MODEL", "text-embedding-3-small"),
 	)
-	vec := messages.NewVectorRepo(dbx, embedder, 0)
+	rows := needingEmbedRows(ctx, dbx, *chatID)
+	slog.Info("embedding missing", "pending", len(rows), "batch", *batch)
+	done, failed := embedBatched(ctx, dbx, embedder, rows, *batch)
 
-	ids := needingEmbed(ctx, dbx, *chatID)
-	slog.Info("embedding missing", "pending", len(ids), "workers", *workers)
-	done, failed := runEmbed(ctx, vec, ids, *workers)
-
-	fmt.Printf("Готово: в файле %d сообщений, в БД теперь %d (+%d новых), векторизовано %d (ошибок %d).\n",
+	fmt.Printf("Готово: в файле %d, в БД теперь %d (+%d новых), векторизовано %d (ошибок %d).\n",
 		len(msgs), after, after-before, done, failed)
 }
 
-// runEmbed параллельно векторизует message-ids через VectorRepo.EmbedAndSave.
-func runEmbed(ctx context.Context, vec *messages.VectorRepo, ids []int64, workers int) (done, failed int64) {
-	if workers < 1 {
-		workers = 1
+type msgRow struct {
+	ID   int64  `db:"id"`
+	Text string `db:"text"`
+}
+
+// embedBatched векторизует батчами через Embedder.EmbedBatch и льёт bulk-INSERT'ом.
+func embedBatched(ctx context.Context, dbx *sqlx.DB, e *llm.Embedder, rows []msgRow, size int) (done, failed int64) {
+	if size < 1 {
+		size = 1
 	}
-	ch := make(chan int64)
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for id := range ch {
-				if err := vec.EmbedAndSave(ctx, id); err != nil {
-					slog.Warn("embed", "id", id, "err", err)
-					atomic.AddInt64(&failed, 1)
-					continue
-				}
-				atomic.AddInt64(&done, 1)
+	model := e.Model()
+	for i := 0; i < len(rows); i += size {
+		j := i + size
+		if j > len(rows) {
+			j = len(rows)
+		}
+		chunk := rows[i:j]
+		texts := make([]string, len(chunk))
+		for k, r := range chunk {
+			texts[k] = r.Text
+		}
+		vecs, err := e.EmbedBatch(ctx, texts)
+		if err != nil {
+			slog.Warn("embed batch", "from_id", chunk[0].ID, "size", len(chunk), "err", err)
+			failed += int64(len(chunk))
+			continue
+		}
+		var b strings.Builder
+		b.WriteString("INSERT INTO embeddings (message_id, embedding, model) VALUES ")
+		args := make([]any, 0, len(chunk)*3)
+		for k, r := range chunk {
+			if k > 0 {
+				b.WriteByte(',')
 			}
-		}()
+			p := k*3 + 1
+			fmt.Fprintf(&b, "($%d,$%d,$%d)", p, p+1, p+2)
+			args = append(args, r.ID, pgvector.NewVector(vecs[k]), model)
+		}
+		b.WriteString(" ON CONFLICT (message_id) DO UPDATE SET embedding=EXCLUDED.embedding, model=EXCLUDED.model")
+		if _, err := dbx.ExecContext(ctx, b.String(), args...); err != nil {
+			slog.Warn("insert embeddings batch", "from_id", chunk[0].ID, "err", err)
+			failed += int64(len(chunk))
+			continue
+		}
+		done += int64(len(chunk))
+		if (i/size)%25 == 0 {
+			slog.Info("embedding progress", "done", done, "failed", failed, "of", len(rows))
+		}
 	}
-	for _, id := range ids {
-		ch <- id
-	}
-	close(ch)
-	wg.Wait()
 	return done, failed
 }
 
@@ -123,18 +142,18 @@ func countMsgs(ctx context.Context, dbx *sqlx.DB, chatID int64) int64 {
 	return n
 }
 
-// needingEmbed — id текстовых сообщений чата без embeddings (только недостающее → идемпотентно).
-func needingEmbed(ctx context.Context, dbx *sqlx.DB, chatID int64) []int64 {
-	var ids []int64
-	if err := dbx.SelectContext(ctx, &ids, `
-		SELECT m.id FROM messages m
+// needingEmbedRows — (id,text) текстовых сообщений чата без embeddings (идемпотентно).
+func needingEmbedRows(ctx context.Context, dbx *sqlx.DB, chatID int64) []msgRow {
+	var rows []msgRow
+	if err := dbx.SelectContext(ctx, &rows, `
+		SELECT m.id, m.text FROM messages m
 		WHERE m.chat_id = $1 AND m.text <> ''
 		  AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.message_id = m.id)
 		ORDER BY m.id
 	`, chatID); err != nil {
 		slog.Error("select unembedded", "err", err)
 	}
-	return ids
+	return rows
 }
 
 func envOr(k, def string) string {
