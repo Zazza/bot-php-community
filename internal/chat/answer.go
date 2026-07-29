@@ -32,7 +32,7 @@ func New(llm *llm.LLMClient, msgs *messages.Repository, vec *messages.VectorRepo
 }
 
 // Answer генерирует ответ на вопрос в контексте чата.
-func (a *Answerer) Answer(ctx context.Context, chatID int64, question string) (string, error) {
+func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question string) (string, error) {
 	q := strings.TrimSpace(question)
 	if q == "" {
 		return "Вопрос пустой.", nil
@@ -68,10 +68,14 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, question string) (s
 	contextBlock := buildContextBlock(rag, recent)
 	system := prompts.Get(prompts.Chat, contextBlock)
 
-	// 5. LLM-вызов.
+	// 5. LLM-вызов. Атрибутируем спрашивающего, чтобы бот не путал имена из контекста.
+	userMsg := q
+	if asker = strings.TrimSpace(asker); asker != "" {
+		userMsg = "Вопрос от " + asker + ":\n" + q
+	}
 	resp, inTok, outTok, err := a.llm.Chat(ctx, []llm.Message{
 		{Role: "system", Content: system},
-		{Role: "user", Content: q},
+		{Role: "user", Content: userMsg},
 	})
 	if err != nil {
 		return "", fmt.Errorf("chat llm: %w", err)

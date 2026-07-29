@@ -322,7 +322,7 @@ func (h *Handlers) answerChat(ctx context.Context, chatID int64, msg *models.Mes
 	go func() {
 		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
 		defer cancel()
-		resp, err := h.answerer.Answer(ctxBg, chatID, question)
+		resp, err := h.answerer.Answer(ctxBg, chatID, replyUsername(msg.From), question)
 		if err != nil {
 			slog.Error("answer chat", "err", err)
 			_ = SendMessage(ctxBg, h.api, chatID, "Не удалось получить ответ, попробуй позже.")
