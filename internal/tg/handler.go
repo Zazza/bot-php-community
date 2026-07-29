@@ -94,7 +94,7 @@ func (h *Handlers) OnMessage(ctx context.Context, b *bot.Bot, upd *models.Update
 	}
 
 	// ЛС: отвечаем только админам, контекст берём из группового чата.
-	if msg.Chat != nil && msg.Chat.Type == "private" {
+	if msg.Chat.Type == "private" {
 		h.pmAnswer(ctx, msg)
 		return
 	}
