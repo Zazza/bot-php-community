@@ -12,6 +12,8 @@ COPY . .
 # CGOFF для статического бинарника (чистый Go, no cgo).
 ENV CGO_ENABLED=0
 RUN go build -trimpath -ldflags="-s -w" -o /out/php-bot ./cmd/bot
+# Утилита разового импорта истории чата (запуск через docker compose exec).
+RUN go build -trimpath -ldflags="-s -w" -o /out/import-history ./cmd/import-history
 
 # --- runtime stage ---
 FROM alpine:3.20
@@ -23,6 +25,7 @@ RUN apk add --no-cache ca-certificates tzdata && \
 
 # Копируем бинарник и директорию под логи.
 COPY --from=builder /out/php-bot /app/php-bot
+COPY --from=builder /out/import-history /app/import-history
 RUN mkdir -p /app/logs && chown -R phpbot:phpbot /app
 
 USER phpbot
