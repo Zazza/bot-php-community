@@ -1,0 +1,42 @@
+name: deploy
+
+# Автодеплой на прод: push в main (или ручной запуск) → SSH на 201.51.5.61
+# под юзером phpbot → git reset --hard origin/main → пересборка бота → docker compose up -d.
+# Действует строго в compose-проекте бота (/srv/php-bot); чужие контейнеры не затрагивает.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Deploy to prod (201.51.5.61, /srv/php-bot)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          fingerprint: ${{ secrets.SSH_FINGERPRINT }}
+          port: 22
+          script_stop: true
+          timeout: 60s
+          command_timeout: 10m
+          script: |
+            set -euo pipefail
+            cd /srv/php-bot
+            git fetch --all --prune
+            git reset --hard origin/main
+            docker compose build --pull bot
+            docker compose up -d
+            echo '=== docker compose ps ==='
+            docker compose ps
+            docker image prune -f
