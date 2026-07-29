@@ -1,0 +1,20 @@
+# binary
+/php-bot
+/bin/
+/dist/
+
+# env (в .env — секреты: токен TG, ключ LLM, пароль БД)
+.env
+.env.local
+.env.*.local
+
+# logs
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store

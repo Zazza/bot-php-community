@@ -1,0 +1,59 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: php-bot-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-phpbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-phpbot}
+      POSTGRES_DB: ${POSTGRES_DB:-php_bot}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Внешний доступ к БД не нужен — бот ходит в неё по внутренней сети.
+    # Раскомментируй, если нужен доступ с хоста (напр. для psql-дебага):
+    # ports:
+    #   - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-phpbot} -d ${POSTGRES_DB:-php_bot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [phpbot-net]
+
+  bot:
+    build: .
+    container_name: php-bot
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Telegram
+      PHPBOT_TG_TOKEN: ${PHPBOT_TG_TOKEN}
+      PHPBOT_ADMIN_IDS: ${PHPBOT_ADMIN_IDS}
+      PHPBOT_CHAT_ID: ${PHPBOT_CHAT_ID}
+      # Postgres — ходим в контейнер db по имени сервиса.
+      PHPBOT_DB_URL: postgres://${POSTGRES_USER:-phpbot}:${POSTGRES_PASSWORD:-phpbot}@db:5432/${POSTGRES_DB:-php_bot}?sslmode=disable
+      # LLM
+      PHPBOT_LLM_URL: ${PHPBOT_LLM_URL:-https://api.vsellm.ru/v1}
+      PHPBOT_LLM_API_KEY: ${PHPBOT_LLM_API_KEY}
+      PHPBOT_LLM_MODEL: ${PHPBOT_LLM_MODEL:-google/gemini-2.5-flash}
+      PHPBOT_EMBED_MODEL: ${PHPBOT_EMBED_MODEL:-text-embedding-3-small}
+      PHPBOT_EMBED_DIM: ${PHPBOT_EMBED_DIM:-1536}
+      # Поведение
+      PHPBOT_QUIET_THRESHOLD: ${PHPBOT_QUIET_THRESHOLD:-20}
+      PHPBOT_TOPIC_CRON: ${PHPBOT_TOPIC_CRON:-0 12,20 * * *}
+      PHPBOT_NEWCOMER_TIMEOUT: ${PHPBOT_NEWCOMER_TIMEOUT:-5m}
+      # Логи
+      TZ: ${TZ:-Europe/Moscow}
+      PHPBOT_LOG_PATH: /app/logs/bot.log
+    volumes:
+      - ./logs:/app/logs
+    networks: [phpbot-net]
+
+volumes:
+  pgdata:
+
+networks:
+  phpbot-net:
+    driver: bridge

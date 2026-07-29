@@ -1,0 +1,179 @@
+// Package messages — repository: сохранение сообщений чата и поиск по векторам.
+package messages
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+)
+
+// Message — строка таблицы messages.
+type Message struct {
+	ID         int64     `db:"id"`
+	ChatID     int64     `db:"chat_id"`
+	UserID     int64     `db:"user_id"`
+	Username   string    `db:"username"`
+	Text       string    `db:"text"`
+	TS         time.Time `db:"ts"`
+	ReplyToID  *int64    `db:"reply_to_id"`
+}
+
+// Repository читает/пишет сообщения и embeddings.
+type Repository struct {
+	db *sqlx.DB
+}
+
+// New создаёт repository.
+func New(db *sqlx.DB) *Repository { return &Repository{db: db} }
+
+// Save сохраняет сообщение (идемпотентно по PK — ON CONFLICT ничего не делает).
+func (r *Repository) Save(ctx context.Context, m *Message) error {
+	_, err := r.db.ExecContext(ctx, `
+		INSERT INTO messages (id, chat_id, user_id, username, text, ts, reply_to_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (id) DO NOTHING
+	`, m.ID, m.ChatID, m.UserID, m.Username, m.Text, m.TS, m.ReplyToID)
+	if err != nil {
+		return fmt.Errorf("save message: %w", err)
+	}
+	return nil
+}
+
+// Last возвращает последние N сообщений чата в хронологическом порядке (старые→новые).
+func (r *Repository) Last(ctx context.Context, chatID int64, limit int) ([]Message, error) {
+	if limit <= 0 {
+		limit = 15
+	}
+	var rows []Message
+	// Берём последние N (DESC) и реверсим в коде для хронологического порядка.
+	if err := r.db.SelectContext(ctx, &rows, `
+		SELECT id, chat_id, user_id, username, text, ts, reply_to_id
+		FROM messages
+		WHERE chat_id = $1
+		ORDER BY ts DESC
+		LIMIT $2
+	`, chatID, limit); err != nil {
+		return nil, fmt.Errorf("last messages: %w", err)
+	}
+	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
+		rows[i], rows[j] = rows[j], rows[i]
+	}
+	return rows, nil
+}
+
+// CountSince возвращает число сообщений в чате за период [since, now].
+func (r *Repository) CountSince(ctx context.Context, chatID int64, since time.Time) (int, error) {
+	var n int
+	if err := r.db.GetContext(ctx, &n, `
+		SELECT count(*) FROM messages WHERE chat_id = $1 AND ts >= $2
+	`, chatID, since); err != nil {
+		return 0, fmt.Errorf("count since: %w", err)
+	}
+	return n, nil
+}
+
+// Since возвращает все сообщения чата за период (хронологически).
+func (r *Repository) Since(ctx context.Context, chatID int64, from, to time.Time) ([]Message, error) {
+	var rows []Message
+	if err := r.db.SelectContext(ctx, &rows, `
+		SELECT id, chat_id, user_id, username, text, ts, reply_to_id
+		FROM messages
+		WHERE chat_id = $1 AND ts >= $2 AND ts < $3
+		ORDER BY ts ASC
+	`, chatID, from, to); err != nil {
+		return nil, fmt.Errorf("messages since: %w", err)
+	}
+	return rows, nil
+}
+
+// LastByUser возвращает последние N сообщений пользователя (для ручной judge-проверки).
+func (r *Repository) LastByUser(ctx context.Context, userID int64, limit int) ([]Message, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	var rows []Message
+	if err := r.db.SelectContext(ctx, &rows, `
+		SELECT id, chat_id, user_id, username, text, ts, reply_to_id
+		FROM messages
+		WHERE user_id = $1
+		ORDER BY ts DESC
+		LIMIT $2
+	`, userID, limit); err != nil {
+		return nil, fmt.Errorf("last by user: %w", err)
+	}
+	return rows, nil
+}
+
+// LastByUsername находит id пользователя и текст его последнего сообщения по @username.
+// Возвращает (0, "", nil) если совпадений нет.
+func (r *Repository) LastByUsername(ctx context.Context, username string) (userID int64, text string, err error) {
+	var row struct {
+		UserID int64  `db:"user_id"`
+		Text   string `db:"text"`
+	}
+	if err := r.db.GetContext(ctx, &row, `
+		SELECT user_id, text FROM messages
+		WHERE username = $1
+		ORDER BY ts DESC LIMIT 1
+	`, username); err != nil {
+		return 0, "", nil // не найдено → не падаем
+	}
+	return row.UserID, row.Text, nil
+}
+
+// Stats — базовая статистика чата.
+type Stats struct {
+	TotalMessages int      `db:"total_messages" json:"total_messages"`
+	ActiveUsers   int      `db:"active_users" json:"active_users"`
+	LastDay       int      `db:"last_day" json:"last_day"`
+	TopPosters    []Poster `json:"top_posters"`
+}
+
+// Poster — активный участник.
+type Poster struct {
+	Username string `db:"username" json:"username"`
+	Count    int    `db:"cnt" json:"count"`
+}
+
+// Stats считает сводку по чату за всё время + топ-5 за неделю.
+func (r *Repository) Stats(ctx context.Context, chatID int64) (*Stats, error) {
+	s := &Stats{}
+	if err := r.db.GetContext(ctx, s, `
+		SELECT
+			count(*) AS total_messages,
+			count(DISTINCT user_id) AS active_users,
+			count(*) FILTER (WHERE ts >= now() - interval '24 hours') AS last_day
+		FROM messages WHERE chat_id = $1
+	`, chatID); err != nil {
+		return nil, fmt.Errorf("stats: %w", err)
+	}
+	var top []Poster
+	if err := r.db.SelectContext(ctx, &top, `
+		SELECT COALESCE(NULLIF(username,''),'user') AS username, count(*) AS cnt
+		FROM messages
+		WHERE chat_id = $1 AND ts >= now() - interval '7 days'
+		GROUP BY username
+		ORDER BY cnt DESC
+		LIMIT 5
+	`, chatID); err != nil {
+		return nil, fmt.Errorf("stats top: %w", err)
+	}
+	s.TopPosters = top
+	return s, nil
+}
+
+// FormatContext собирает сообщения в строку для подачи в системный промпт LLM.
+func FormatContext(msgs []Message) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		who := m.Username
+		if who == "" {
+			who = "user"
+		}
+		fmt.Fprintf(&b, "[%s] %s: %s\n", m.TS.Format("15:04:05"), who, m.Text)
+	}
+	return b.String()
+}
