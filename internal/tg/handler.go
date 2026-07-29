@@ -26,6 +26,7 @@ type Handlers struct {
 	chatIDs      map[int64]struct{}
 	botUserID    int64  // собственный id бота, чтобы отличать reply-to-bot
 	botUsername  string // ник бота для @упоминаний
+	primaryChatID int64 // первый групповой чат — источник контекста для ответов в ЛС
 
 	moderation *moderation.Flow
 	users      *users.Repository
@@ -67,6 +68,9 @@ func NewHandlers(d HandlersDeps) *Handlers {
 	for _, id := range d.ChatIDs {
 		h.chatIDs[id] = struct{}{}
 	}
+	if len(d.ChatIDs) > 0 {
+		h.primaryChatID = d.ChatIDs[0]
+	}
 	return h
 }
 
@@ -86,6 +90,12 @@ func (h *Handlers) OnMessage(ctx context.Context, b *bot.Bot, upd *models.Update
 			}
 			h.moderation.OnNewMember(ctx, chatID, u.ID, u.Username)
 		}
+		return
+	}
+
+	// ЛС: отвечаем только админам, контекст берём из группового чата.
+	if msg.Chat != nil && msg.Chat.Type == "private" {
+		h.pmAnswer(ctx, msg)
 		return
 	}
 
@@ -329,6 +339,42 @@ func (h *Handlers) answerChat(ctx context.Context, chatID int64, msg *models.Mes
 			return
 		}
 		_ = SendMessage(ctxBg, h.api, chatID, resp)
+	}()
+}
+
+// pmAnswer — ответ в личке. Доступ только админам. Контекст (RAG + свежие) — из
+// группового чата (primaryChatID), ответ шлётся в ЛС. Сообщения ЛС в историю не пишем.
+func (h *Handlers) pmAnswer(ctx context.Context, msg *models.Message) {
+	if msg.From == nil || !h.moderation.IsAdmin(msg.From.ID) {
+		_ = SendMessage(ctx, h.api, msg.Chat.ID, "В личке я отвечаю только администраторам чата.")
+		return
+	}
+	if h.primaryChatID == 0 {
+		_ = SendMessage(ctx, h.api, msg.Chat.ID, "Групповой чат не настроен.")
+		return
+	}
+	q := strings.TrimSpace(msg.Text)
+	if q == "" && msg.Caption != "" {
+		q = msg.Caption
+	}
+	if cmd, args := extractCommand(q); cmd == "ask" { // опционально "/ask вопрос"
+		q = strings.TrimSpace(args)
+	}
+	if q == "" {
+		_ = SendMessage(ctx, h.api, msg.Chat.ID, "Спроси что-нибудь конкретнее 🙂")
+		return
+	}
+	asker := replyUsername(msg.From)
+	go func() {
+		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
+		defer cancel()
+		resp, err := h.answerer.Answer(ctxBg, h.primaryChatID, asker, q)
+		if err != nil {
+			slog.Error("pm answer", "err", err)
+			_ = SendMessage(ctxBg, h.api, msg.Chat.ID, "Не удалось получить ответ, попробуй позже.")
+			return
+		}
+		_ = SendMessage(ctxBg, h.api, msg.Chat.ID, resp)
 	}()
 }
 
