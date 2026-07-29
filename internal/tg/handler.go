@@ -2,6 +2,7 @@ package tg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -227,12 +228,10 @@ func (h *Handlers) cmdTopic(ctx context.Context, chatID int64, msg *models.Messa
 		_ = SendMessage(ctx, h.api, chatID, "Использование: /topic now")
 		return
 	}
-	topic, err := h.topics.PostNow(ctx, chatID)
-	if err != nil {
+	// PostNow сам постит тему через Scheduler.post() — повторно не отправляем.
+	if _, err := h.topics.PostNow(ctx, chatID); err != nil {
 		_ = SendMessage(ctx, h.api, chatID, "Не удалось сгенерировать тему: "+err.Error())
-		return
 	}
-	_ = SendMessage(ctx, h.api, chatID, "🗣 Тема для обсуждения:\n\n"+topic)
 }
 
 func (h *Handlers) cmdDigest(ctx context.Context, chatID int64, msg *models.Message, args string) {
@@ -252,7 +251,11 @@ func (h *Handlers) cmdDigest(ctx context.Context, chatID int64, msg *models.Mess
 		end := time.Now()
 		start := end.Add(-7 * 24 * time.Hour)
 		if err := h.digester.PostDigest(ctxBg, chatID, start, end); err != nil {
-			_ = SendMessage(ctxBg, h.api, chatID, "Ошибка дайджеста: "+err.Error())
+			if errors.Is(err, topics.ErrTooFewMessages) {
+				_ = SendMessage(ctxBg, h.api, chatID, "Недостаточно сообщений за неделю для дайджеста (нужно минимум 3).")
+			} else {
+				_ = SendMessage(ctxBg, h.api, chatID, "Ошибка дайджеста: "+err.Error())
+			}
 		}
 	}()
 }

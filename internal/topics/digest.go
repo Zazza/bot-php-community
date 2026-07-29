@@ -2,6 +2,7 @@ package topics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -13,6 +14,13 @@ import (
 	"phpbot/internal/messages"
 	"phpbot/internal/prompts"
 )
+
+// ErrTooFewMessages — дайджест не строится: за период слишком мало сообщений.
+// Cron трактует как не-ошибку (debug), ручная команда /digest — сообщает пользователю.
+var ErrTooFewMessages = errors.New("too few messages for digest")
+
+// minDigestMessages — минимальное число сообщений за период, чтобы дайджест имел смысл.
+const minDigestMessages = 3
 
 // Digester делает недельную суммаризацию чата.
 type Digester struct {
@@ -39,7 +47,11 @@ func (d *Digester) Start(ctx context.Context, spec string) error {
 		start := end.Add(-7 * 24 * time.Hour)
 		for _, chatID := range d.chatIDs {
 			if err := d.PostDigest(bg, chatID, start, end); err != nil {
-				slog.Error("weekly digest", "chat_id", chatID, "err", err)
+				if errors.Is(err, ErrTooFewMessages) {
+					slog.Debug("weekly digest skipped", "chat_id", chatID, "err", err)
+				} else {
+					slog.Error("weekly digest", "chat_id", chatID, "err", err)
+				}
 			}
 		}
 	})
@@ -65,9 +77,9 @@ func (d *Digester) PostDigest(ctx context.Context, chatID int64, start, end time
 	if err != nil {
 		return fmt.Errorf("since: %w", err)
 	}
-	if len(msgs) < 3 {
+	if len(msgs) < minDigestMessages {
 		slog.Info("digest: too few messages, skip", "chat_id", chatID, "count", len(msgs))
-		return nil
+		return fmt.Errorf("%w: have %d, need %d", ErrTooFewMessages, len(msgs), minDigestMessages)
 	}
 	material := chatFormatForDigest(msgs)
 	prompt := prompts.Get(prompts.Digest, material)
