@@ -892,9 +892,30 @@ func (h *Handlers) cmdReport(ctx context.Context, replyChatID, dataChatID int64,
 
 // --- вспомогательное ---
 
+// enrichQuestion добавляет контекст ответа-на-бота: если триггер — reply на сообщение
+// самого бота, препендим его текст (обрезка), чтобы RAG якорился на процитированном факте
+// (кейс «тегают на то, что он сказал»), а не на пустой текст reply.
+func enrichQuestion(question string, msg *models.Message, botUserID int64) string {
+	if msg == nil || msg.ReplyToMessage == nil || msg.ReplyToMessage.From == nil ||
+		msg.ReplyToMessage.From.ID != botUserID {
+		return question
+	}
+	ref := strings.TrimSpace(msg.ReplyToMessage.Text)
+	if ref == "" {
+		return question
+	}
+	if len(ref) > 1500 {
+		ref = ref[:1500] + "…"
+	}
+	if question == "" {
+		return "Сообщение, на которое ответили:\n" + ref
+	}
+	return "Сообщение, на которое ответили:\n" + ref + "\n\nВопрос: " + question
+}
+
 // answerChat вызывает answerer (контекст из dataChatID) и шлёт ответ в replyChatID.
 func (h *Handlers) answerChat(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, question string) {
-	question = strings.TrimSpace(question)
+	question = enrichQuestion(strings.TrimSpace(question), msg, h.botUserID)
 	if question == "" {
 		_ = SendMessage(ctx, h.api, replyChatID, "Спроси что-нибудь конкретнее 🙂")
 		return

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ const (
 	alreadyDiscussedMaxDist = 0.18  // косинусное расстояние: меньше → строже; 0.18 ≈ сходство 0.82
 	faqMatchMaxDist         = 0.20  // курируемый FAQ отдаётся сразу при расстоянии вопроса ниже порога
 	askRelevanceMaxDist     = 0.50  // гейт /ask: лучший RAG-матч дальше → темы в истории нет, LLM не зовётся
+	ragMinLen               = 30   // мин. длина сообщения для RAG /ask: короткий мусор не забивает top-K
 )
 
 // Answerer собирает контекст (RAG + последние сообщения + веб) и зовёт LLM.
@@ -68,7 +70,7 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 	var topSearch []messages.SearchMessage
 	var rag []messages.Message
 	if qvec != nil {
-		rows, err := a.vec.SearchTopK(ctx, chatID, qvec, topK)
+		rows, err := a.vec.SearchFiltered(ctx, chatID, qvec, topK, "", nil, nil, ragMinLen)
 		if err != nil {
 			slog.Warn("search top-k failed", "err", err)
 		} else {
@@ -151,6 +153,9 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 	final := prefix + resp
 	if len(final) > maxAnswerLen {
 		final = final[:maxAnswerLen] + "\n…(обрезано)"
+	}
+	if len(topSearch) > 0 {
+		final += "\n\n📖 Источник: " + sourceLink(chatID, topSearch[0].ID)
 	}
 	return final, nil
 }
@@ -276,6 +281,13 @@ func notInHistoryReply(embedFailed bool) string {
 		return "⚠️ Не получилось проверить историю чата, попробуй ещё раз."
 	}
 	return "В истории чата это не обсуждали — лучше спросить у участников 🙋"
+}
+
+// sourceLink строит прямую ссылку на сообщение супергруппы: t.me/c/<internal_id>/<msg_id>.
+// internal_id — chat_id без маркера супергруппы «-100».
+func sourceLink(chatID, msgID int64) string {
+	s := strings.TrimPrefix(strconv.FormatInt(chatID, 10), "-100")
+	return "https://t.me/c/" + s + "/" + strconv.FormatInt(msgID, 10)
 }
 
 // FormatRecentForDigest — экспорт FormatContext-подобной утилиты для дайджеста.

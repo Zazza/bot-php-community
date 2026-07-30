@@ -61,3 +61,18 @@ func TestNotInHistoryReply(t *testing.T) {
 		t.Fatal("embedFailed and irrelevant replies should differ")
 	}
 }
+
+func TestSourceLink(t *testing.T) {
+	cases := []struct {
+		chatID, msgID int64
+		want          string
+	}{
+		{-1001120236018, 12345, "https://t.me/c/1120236018/12345"},
+		{-1001120236018, 1, "https://t.me/c/1120236018/1"},
+	}
+	for _, c := range cases {
+		if got := sourceLink(c.chatID, c.msgID); got != c.want {
+			t.Fatalf("sourceLink(%d,%d) = %q, want %q", c.chatID, c.msgID, got, c.want)
+		}
+	}
+}
