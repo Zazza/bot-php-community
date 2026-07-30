@@ -30,9 +30,6 @@ const spamClassifyTimeout = 25 * time.Second
 // сообщение не терялось, если LLM съела почти всё время классификации).
 const spamSaveTimeout = 15 * time.Second
 
-// expertMaxDist — косинусный радиус «по теме» для /expert (~0.65 сходства).
-const expertMaxDist = 0.35
-
 // searchMinLen — минимальная длина (в символах) сообщения для /search. Отсекает
 // bare-токены («yii3», «yii2») на уровне SQL, чтобы они не забивали top-K по косинусу
 // и не вытесняли содержательные сообщения из пула ранжирования.
@@ -428,20 +425,14 @@ func (h *Handlers) cmdExpert(ctx context.Context, replyChatID, dataChatID int64,
 		_ = SendMessage(ctx, h.api, replyChatID, "Использование: /expert <тема>\nПример: /expert pgvector индексы")
 		return
 	}
-	qvec, err := h.vec.EmbedText(ctx, topic)
-	if err != nil {
-		slog.Error("expert embed", "err", err, "topic", topic)
-		_ = SendMessage(ctx, h.api, replyChatID, "Не удалось обработать тему.")
-		return
-	}
-	exps, err := h.vec.Experts(ctx, dataChatID, qvec, expertMaxDist, 5)
+	exps, err := h.msgs.ExpertByKeyword(ctx, dataChatID, topic, 5)
 	if err != nil {
 		slog.Error("experts", "err", err, "chat", dataChatID)
 		_ = SendMessage(ctx, h.api, replyChatID, "Не удалось найти экспертов.")
 		return
 	}
 	if len(exps) == 0 {
-		_ = SendMessage(ctx, h.api, replyChatID, "🎓 По теме «"+topic+"» никого конкретного в истории не нашёл.")
+		_ = SendMessage(ctx, h.api, replyChatID, "🎓 По теме «"+topic+"» никто не упоминал в истории. Попробуй синоним.")
 		return
 	}
 	var b strings.Builder

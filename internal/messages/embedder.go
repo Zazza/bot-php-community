@@ -173,33 +173,6 @@ type Expert struct {
 	Count    int    `db:"cnt" json:"count"`
 }
 
-// Experts считает, сколько сообщений каждого пользователя лежат в радиусе maxDist
-// (косинусное расстояние) к теме — кто чаще пишет по ней. Имя берётся из users.username
-// (настоящий @handle, актуален) и лишь при его отсутствии — из messages.username
-// (там у импортированной истории может лежать display-name). Группировка только по
-// user_id — иначе разные username у одного юзера дробили бы счётчик.
-func (v *VectorRepo) Experts(ctx context.Context, chatID int64, queryVec []float32, maxDist float64, limit int) ([]Expert, error) {
-	if limit <= 0 {
-		limit = 5
-	}
-	var rows []Expert
-	if err := v.db.SelectContext(ctx, &rows, `
-		SELECT m.user_id,
-		       COALESCE(NULLIF(MAX(u.username),''), NULLIF(MAX(m.username),''), 'user') AS username,
-		       count(*) AS cnt
-		FROM embeddings e
-		JOIN messages m ON m.id = e.message_id
-		LEFT JOIN users u ON u.tg_user_id = m.user_id
-		WHERE m.chat_id = $1 AND (e.embedding <=> $2) < $3
-		GROUP BY m.user_id
-		ORDER BY cnt DESC
-		LIMIT $4
-	`, chatID, pgvector.NewVector(queryVec), maxDist, limit); err != nil {
-		return nil, fmt.Errorf("experts: %w", err)
-	}
-	return rows, nil
-}
-
 // FormatSearchResult — человекочитаемая выдача для /search в TG.
 func FormatSearchResult(rows []SearchMessage) string {
 	var b strings.Builder

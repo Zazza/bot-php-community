@@ -150,6 +150,40 @@ func (r *Repository) ByUsername(ctx context.Context, chatID int64, username stri
 	return rows, nil
 }
 
+// ExpertByKeyword считает сообщения каждого автора, где упоминается тема (keyword,
+// case-insensitive) — кто реально пишет по теме. В отличие от семантического поиска с
+// жёстким косинус-порогом, даёт точный счёт упоминаний (напр. 85 по «yii3», а не «3»).
+// Имя: users.username (настоящий @handle), fallback messages.username. user_id=0
+// (без атрибуции) исключается.
+func (r *Repository) ExpertByKeyword(ctx context.Context, chatID int64, topic string, limit int) ([]Expert, error) {
+	topic = strings.TrimSpace(topic)
+	if limit <= 0 {
+		limit = 5
+	}
+	pattern := "%" + escapeILIKE(topic) + "%"
+	var rows []Expert
+	if err := r.db.SelectContext(ctx, &rows, `
+		SELECT m.user_id,
+		       COALESCE(NULLIF(MAX(u.username),''), NULLIF(MAX(m.username),''), 'user') AS username,
+		       count(*) AS cnt
+		FROM messages m
+		LEFT JOIN users u ON u.tg_user_id = m.user_id
+		WHERE m.chat_id = $1 AND m.user_id <> 0 AND m.text ILIKE $2 ESCAPE '\'
+		GROUP BY m.user_id
+		ORDER BY cnt DESC
+		LIMIT $3
+	`, chatID, pattern, limit); err != nil {
+		return nil, fmt.Errorf("experts keyword: %w", err)
+	}
+	return rows, nil
+}
+
+// escapeILIKE экранирует спецсимволы шаблона ILIKE (%, _) и сам escape-символ (\),
+// чтобы тема искалась буквально, а не как glob-шаблон.
+func escapeILIKE(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
 // LastByUsername находит id пользователя и текст его последнего сообщения по @username.
 // Возвращает (0, "", nil) если совпадений нет.
 func (r *Repository) LastByUsername(ctx context.Context, username string) (userID int64, text string, err error) {
