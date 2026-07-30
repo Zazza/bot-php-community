@@ -44,6 +44,17 @@ func (r *Repo) ReplaceAll(ctx context.Context, chatID int64, items []Item) error
 		return fmt.Errorf("delete faq: %w", err)
 	}
 
+	var empty bool
+	if err := tx.GetContext(ctx, &empty, `SELECT NOT EXISTS (SELECT 1 FROM faq_items)`); err != nil {
+		return fmt.Errorf("faq empty check: %w", err)
+	}
+	if empty {
+		if _, err := tx.ExecContext(ctx,
+			`SELECT setval(pg_get_serial_sequence('faq_items', 'id'), 1, false)`); err != nil {
+			return fmt.Errorf("faq reset seq: %w", err)
+		}
+	}
+
 	for _, it := range items {
 		var vecVal interface{}
 		if it.Vec != nil {
