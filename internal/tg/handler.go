@@ -448,17 +448,105 @@ func (h *Handlers) cmdExpert(ctx context.Context, replyChatID, dataChatID int64,
 	fmt.Fprintf(&b, "🎓 По теме «%s» лучше спросить:\n", html.EscapeString(topic))
 	for i, e := range exps {
 		name := e.Username
-		if name == "" {
-			name = "user"
+		// В БД только display-name (юзера не видели живьём) — достаём актуальный @handle
+		// у Telegram и кэшируем. Если хэндла нет вовсе — останется имя без «@».
+		if !isTelegramHandle(name) {
+			if live := h.resolveExpertHandle(ctx, dataChatID, e.UserID); isTelegramHandle(live) {
+				name = live
+			}
 		}
-		fmt.Fprintf(&b, "%d. <a href=\"tg://user?id=%d\">@%s</a> — %d сообщений\n",
-			i+1, e.UserID, html.EscapeString(name), e.Count)
+		b.WriteString(expertLine(i+1, e.UserID, name, e.Count))
 	}
 	if _, err := h.api.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: replyChatID, Text: b.String(), ParseMode: models.ParseModeHTML,
 	}); err != nil {
 		slog.Warn("expert send html", "err", err, "chat", replyChatID)
 	}
+}
+
+// expertLine формирует строку списка /expert: настоящий @handle — с «@»,
+// иначе имя/отображаемое имя — без «@» (кликабельно через tg://user?id= ссылку).
+// Пустое имя → «user». i — 1-based номер.
+func expertLine(i int, userID int64, username string, count int) string {
+	name := strings.TrimSpace(username)
+	visible := name
+	if isTelegramHandle(name) {
+		visible = "@" + name
+	} else if visible == "" {
+		visible = "user"
+	}
+	return fmt.Sprintf("%d. <a href=\"tg://user?id=%d\">%s</a> — %d сообщений\n",
+		i, userID, html.EscapeString(visible), count)
+}
+
+// isTelegramHandle — похоже ли значение на настоящий TG @username: 5–32 символа из
+// [A-Za-z0-9_], без пробелов и не-ASCII. Отличает handle от display-name.
+func isTelegramHandle(s string) bool {
+	if len(s) < 5 || len(s) > 32 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveExpertHandle достаёт актуальный @handle участника через Telegram API (getChatMember)
+// и кэширует его (TouchUser → lazy backfill истории, следующий раз без запроса).
+// Non-fatal: ошибка или отсутствие хэндла → "". Только для тех, у кого в БД display-name.
+func (h *Handlers) resolveExpertHandle(ctx context.Context, chatID, userID int64) string {
+	cm, err := h.api.GetChatMember(ctx, &bot.GetChatMemberParams{ChatID: chatID, UserID: userID})
+	if err != nil {
+		slog.Warn("expert getChatMember", "err", err, "user_id", userID)
+		return ""
+	}
+	handle := memberUsername(cm)
+	if handle != "" {
+		if err := h.users.TouchUser(ctx, userID, handle); err != nil {
+			slog.Warn("expert touch user", "err", err, "user_id", userID)
+		}
+	}
+	return handle
+}
+
+// memberUsername достаёт @handle из ChatMember любого статуса. Пусто, если нет.
+func memberUsername(cm *models.ChatMember) string {
+	if cm == nil {
+		return ""
+	}
+	var u *models.User
+	switch cm.Type {
+	case models.ChatMemberTypeOwner:
+		if cm.Owner != nil {
+			u = cm.Owner.User
+		}
+	case models.ChatMemberTypeAdministrator:
+		if cm.Administrator != nil {
+			u = &cm.Administrator.User
+		}
+	case models.ChatMemberTypeMember:
+		if cm.Member != nil {
+			u = cm.Member.User
+		}
+	case models.ChatMemberTypeRestricted:
+		if cm.Restricted != nil {
+			u = cm.Restricted.User
+		}
+	case models.ChatMemberTypeLeft:
+		if cm.Left != nil {
+			u = cm.Left.User
+		}
+	case models.ChatMemberTypeBanned:
+		if cm.Banned != nil {
+			u = cm.Banned.User
+		}
+	}
+	if u != nil {
+		return u.Username
+	}
+	return ""
 }
 
 func (h *Handlers) cmdTopic(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, args string) {
