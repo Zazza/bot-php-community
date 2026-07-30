@@ -20,6 +20,7 @@ const (
 	clusterMaxDist = 0.22 // косинусное расстояние: вопросы в один кластер
 	buildMsgLimit  = 800  // сколько последних вопросо-сообщений анализировать
 	maxFAQItems    = 60   // потолок записей на чат
+	minAnswerRunes = 40   // порог длины ответа: короче — мусор, не FAQ
 )
 
 // Builder офлайн собирает FAQ: кластеризует вопросо-сообщения по эмбеддингам и для
@@ -55,9 +56,13 @@ func (b *Builder) Build(ctx context.Context, chatID int64) (int, error) {
 		SELECT m.id, m.text, m.ts, m.user_id, e.embedding
 		FROM messages m
 		JOIN embeddings e ON e.message_id = m.id
-		WHERE m.chat_id = $1 AND m.text LIKE '%?%'
-		ORDER BY m.ts DESC
-		LIMIT $2
+		WHERE m.chat_id = $1
+		  AND m.text LIKE '%?%'
+		  AND char_length(m.text) BETWEEN 15 AND 200
+		  AND m.text NOT ILIKE '%http%'
+		  AND m.text NOT ILIKE '%www.%'
+		  AND m.text NOT ILIKE '%t.me%'
+		ORDER BY m.ts DESC LIMIT $2
 	`, chatID, buildMsgLimit); err != nil {
 		return 0, fmt.Errorf("select questions: %w", err)
 	}
@@ -92,6 +97,9 @@ func (b *Builder) Build(ctx context.Context, chatID int64) (int, error) {
 			if ans == nil || ans.UserID == rows[idx].UserID {
 				continue
 			}
+			if len([]rune(ans.Text)) < minAnswerRunes {
+				continue
+			}
 			if _, dup := seen[ans.Text]; dup {
 				continue
 			}
@@ -99,7 +107,7 @@ func (b *Builder) Build(ctx context.Context, chatID int64) (int, error) {
 			answers = append(answers, ans.Text)
 		}
 		if len(answers) == 0 {
-			continue // вопрос без ответа — не FAQ
+			continue // нет содержательных ответов — не FAQ
 		}
 
 		userMsg := "Вопрос: " + rows[canonIdx].Text +
@@ -112,15 +120,15 @@ func (b *Builder) Build(ctx context.Context, chatID int64) (int, error) {
 			slog.Warn("faq llm skip cluster", "err", err)
 			continue
 		}
-		answer := strings.TrimSpace(resp)
-		if answer == "" {
+		resp = strings.TrimSpace(resp)
+		if resp == "" || resp == "SKIP" || strings.HasPrefix(resp, "SKIP") {
 			continue
 		}
 
 		items = append(items, Item{
 			ChatID:   chatID,
 			Question: rows[canonIdx].Text,
-			Answer:   answer,
+			Answer:   resp,
 			Vec:      rows[canonIdx].Embed.Slice(),
 		})
 	}

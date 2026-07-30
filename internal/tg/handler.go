@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"runtime/debug"
 	"strings"
@@ -382,11 +383,20 @@ func (h *Handlers) cmdExpert(ctx context.Context, replyChatID, dataChatID int64,
 		return
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "🎓 По теме «%s» лучше спросить:\n", topic)
+	fmt.Fprintf(&b, "🎓 По теме «%s» лучше спросить:\n", html.EscapeString(topic))
 	for i, e := range exps {
-		fmt.Fprintf(&b, "%d. @%s — %d сообщений\n", i+1, e.Username, e.Count)
+		name := e.Username
+		if name == "" {
+			name = "user"
+		}
+		fmt.Fprintf(&b, "%d. <a href=\"tg://user?id=%d\">@%s</a> — %d сообщений\n",
+			i+1, e.UserID, html.EscapeString(name), e.Count)
 	}
-	_ = SendMessage(ctx, h.api, replyChatID, b.String())
+	if _, err := h.api.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: replyChatID, Text: b.String(), ParseMode: models.ParseModeHTML,
+	}); err != nil {
+		slog.Warn("expert send html", "err", err, "chat", replyChatID)
+	}
 }
 
 func (h *Handlers) cmdTopic(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, args string) {
@@ -552,6 +562,13 @@ func (h *Handlers) faqList(ctx context.Context, replyChatID, dataChatID int64) {
 			q = string(r[:60]) + "…"
 		}
 		line := fmt.Sprintf("\n%d. %s", it.ID, q)
+		if it.Answer != "" {
+			a := it.Answer
+			if r := []rune(a); len(r) > 80 {
+				a = string(r[:80]) + "…"
+			}
+			line += fmt.Sprintf("\n   ↳ %s", a)
+		}
 		if b.Len()+len(line) > faqListMaxRunes {
 			b.WriteString("\n…(обрезано)")
 			break
