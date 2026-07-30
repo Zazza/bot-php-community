@@ -31,3 +31,25 @@ func TestEnrichQuestion(t *testing.T) {
 		})
 	}
 }
+
+func TestReplyToBot(t *testing.T) {
+	const bot int64 = 42
+	cases := []struct {
+		name string
+		msg  *models.Message
+		want bool
+	}{
+		{"nil", nil, false},
+		{"no reply", &models.Message{}, false},
+		{"reply to other user", &models.Message{ReplyToMessage: &models.Message{From: &models.User{ID: 99}}}, false},
+		{"reply to bot no from", &models.Message{ReplyToMessage: &models.Message{}}, false},
+		{"reply to bot", &models.Message{ReplyToMessage: &models.Message{From: &models.User{ID: 42}}}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := replyToBot(c.msg, bot); got != c.want {
+				t.Fatalf("replyToBot(%s) = %v, want %v", c.name, got, c.want)
+			}
+		})
+	}
+}

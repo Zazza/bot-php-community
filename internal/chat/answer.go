@@ -42,7 +42,7 @@ func New(llm *llm.LLMClient, msgs *messages.Repository, vec *messages.VectorRepo
 }
 
 // Answer генерирует ответ на вопрос в контексте чата.
-func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question string) (string, error) {
+func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question string, engage bool) (string, error) {
 	q := strings.TrimSpace(question)
 	if q == "" {
 		return "Вопрос пустой.", nil
@@ -85,8 +85,11 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 	// 2b. Релевантность-гейт: бот отвечает только из истории чата. Если векторизации
 	// нет (embed упал) или лучший матч далёк — LLM не зовём (экономия + анти-генерика),
 	// отбой к живым участникам. web-поиск тоже пропускаем — он не нужен для оффтопа.
-	if !relevantEnough(topSearch, askRelevanceMaxDist) {
-		slog.Info("chat skip: not in chat history", "chat_id", chatID, "embed_failed", qvec == nil)
+	// НЕ применяется при engage (reply-на-бота): человек обращается к сказанному ботом,
+	// контекст уже есть в последних сообщениях — бот обязан вступить в диалог.
+	if !engage && !relevantEnough(topSearch, askRelevanceMaxDist) {
+		slog.Info("chat skip: not in chat history", "chat_id", chatID,
+			"embed_failed", qvec == nil, "best_dist", bestDist(topSearch), "q_len", len(q))
 		return notInHistoryReply(qvec == nil), nil
 	}
 
@@ -124,7 +127,8 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 		return "", fmt.Errorf("chat llm: %w", err)
 	}
 	slog.Info("chat answer", "chat_id", chatID, "in", inTok, "out", outTok,
-		"rag_len", len(rag), "recent_len", len(recent), "web_len", len(web))
+		"rag_len", len(rag), "recent_len", len(recent), "web_len", len(web),
+		"best_dist", bestDist(topSearch), "q_len", len(q), "engage", engage)
 
 	// 5b. LLM вернул SKIP — контекст прошёл гейт, но ответа в нём нет: отбой к людям.
 	if isSkip(resp) {
@@ -268,6 +272,14 @@ func buildContextBlock(rag []messages.Message, recent []messages.Message, web []
 // истории чата не обсуждалась, бот не отвечает (экономия LLM-вызова + анти-генерика).
 func relevantEnough(top []messages.SearchMessage, maxDist float64) bool {
 	return len(top) > 0 && top[0].Distance <= maxDist
+}
+
+// bestDist — дистанция лучшего RAG-матча (-1, если пусто), только для логов/диагностики.
+func bestDist(top []messages.SearchMessage) float64 {
+	if len(top) == 0 {
+		return -1
+	}
+	return top[0].Distance
 }
 
 // isSkip — LLM вернул SKIP (контекст прошёл гейт, но не отвечает на вопрос).

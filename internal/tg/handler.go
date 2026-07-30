@@ -892,12 +892,17 @@ func (h *Handlers) cmdReport(ctx context.Context, replyChatID, dataChatID int64,
 
 // --- вспомогательное ---
 
+// replyToBot — триггер: ответ reply на сообщение самого бота.
+func replyToBot(msg *models.Message, botUserID int64) bool {
+	return msg != nil && msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil &&
+		msg.ReplyToMessage.From.ID == botUserID
+}
+
 // enrichQuestion добавляет контекст ответа-на-бота: если триггер — reply на сообщение
 // самого бота, препендим его текст (обрезка), чтобы RAG якорился на процитированном факте
 // (кейс «тегают на то, что он сказал»), а не на пустой текст reply.
 func enrichQuestion(question string, msg *models.Message, botUserID int64) string {
-	if msg == nil || msg.ReplyToMessage == nil || msg.ReplyToMessage.From == nil ||
-		msg.ReplyToMessage.From.ID != botUserID {
+	if !replyToBot(msg, botUserID) {
 		return question
 	}
 	ref := strings.TrimSpace(msg.ReplyToMessage.Text)
@@ -920,10 +925,11 @@ func (h *Handlers) answerChat(ctx context.Context, replyChatID, dataChatID int64
 		_ = SendMessage(ctx, h.api, replyChatID, "Спроси что-нибудь конкретнее 🙂")
 		return
 	}
+	engage := replyToBot(msg, h.botUserID) // reply-на-бота обходит жёсткий гейт
 	go func() {
 		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
 		defer cancel()
-		resp, err := h.answerer.Answer(ctxBg, dataChatID, replyUsername(msg.From), question)
+		resp, err := h.answerer.Answer(ctxBg, dataChatID, replyUsername(msg.From), question, engage)
 		if err != nil {
 			slog.Error("answer chat", "err", err)
 			_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось получить ответ, попробуй позже.")
@@ -959,7 +965,7 @@ func (h *Handlers) pmAnswer(ctx context.Context, msg *models.Message) {
 	go func() {
 		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
 		defer cancel()
-		resp, err := h.answerer.Answer(ctxBg, h.primaryChatID, asker, q)
+		resp, err := h.answerer.Answer(ctxBg, h.primaryChatID, asker, q, false)
 		if err != nil {
 			slog.Error("pm answer", "err", err)
 			_ = SendMessage(ctxBg, h.api, msg.Chat.ID, "Не удалось получить ответ, попробуй позже.")
