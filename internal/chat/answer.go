@@ -11,6 +11,7 @@ import (
 	"phpbot/internal/llm"
 	"phpbot/internal/messages"
 	"phpbot/internal/prompts"
+	"phpbot/internal/websearch"
 )
 
 const (
@@ -19,16 +20,17 @@ const (
 	maxAnswerLen = 3500 // TG лимит 4096, оставляем запас
 )
 
-// Answerer собирает контекст (RAG + последние сообщения) и зовёт LLM.
+// Answerer собирает контекст (RAG + последние сообщения + веб) и зовёт LLM.
 type Answerer struct {
-	llm   *llm.LLMClient
-	msgs  *messages.Repository
-	vec   *messages.VectorRepo
+	llm  *llm.LLMClient
+	msgs *messages.Repository
+	vec  *messages.VectorRepo
+	web  *websearch.Searcher // nil → веб-поиск выключен
 }
 
-// New создаёт Answerer.
-func New(llm *llm.LLMClient, msgs *messages.Repository, vec *messages.VectorRepo) *Answerer {
-	return &Answerer{llm: llm, msgs: msgs, vec: vec}
+// New создаёт Answerer. web может быть nil.
+func New(llm *llm.LLMClient, msgs *messages.Repository, vec *messages.VectorRepo, web *websearch.Searcher) *Answerer {
+	return &Answerer{llm: llm, msgs: msgs, vec: vec, web: web}
 }
 
 // Answer генерирует ответ на вопрос в контексте чата.
@@ -64,8 +66,19 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 		slog.Warn("last messages failed", "err", err)
 	}
 
+	// 3b. Веб-поиск — актуализация свежих фактов (версии/релизы/даты/новости).
+	// Non-fatal: упал → отвечаем без веба.
+	var web []websearch.Result
+	if a.web != nil {
+		if wr, werr := a.web.Search(ctx, q); werr != nil {
+			slog.Warn("web search failed, answering without web", "err", werr)
+		} else {
+			web = wr
+		}
+	}
+
 	// 4. Сборка контекста.
-	contextBlock := buildContextBlock(rag, recent)
+	contextBlock := buildContextBlock(rag, recent, web)
 	system := prompts.Get(prompts.Chat, contextBlock)
 
 	// 5. LLM-вызов. Атрибутируем спрашивающего, чтобы бот не путал имена из контекста.
@@ -81,7 +94,7 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 		return "", fmt.Errorf("chat llm: %w", err)
 	}
 	slog.Info("chat answer", "chat_id", chatID, "in", inTok, "out", outTok,
-		"rag_len", len(rag), "recent_len", len(recent))
+		"rag_len", len(rag), "recent_len", len(recent), "web_len", len(web))
 
 	if len(resp) > maxAnswerLen {
 		resp = resp[:maxAnswerLen] + "\n…(обрезано)"
@@ -90,8 +103,13 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 }
 
 // buildContextBlock формирует текстовый блок контекста для системного промпта.
-func buildContextBlock(rag []messages.Message, recent []messages.Message) string {
+func buildContextBlock(rag []messages.Message, recent []messages.Message, web []websearch.Result) string {
 	var b strings.Builder
+	if len(web) > 0 {
+		b.WriteString("[Актуальное из веба]\n")
+		b.WriteString(websearch.FormatResults(web))
+		b.WriteString("\n")
+	}
 	if len(rag) > 0 {
 		b.WriteString("[Найдено по смыслу в истории чата]\n")
 		b.WriteString(messages.FormatContext(rag))

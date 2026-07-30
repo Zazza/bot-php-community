@@ -11,35 +11,47 @@ import (
 
 // Config — все настройки бота.
 type Config struct {
-	TGToken          string
-	AdminIDs         []int64
-	ChatIDs          []int64
-	DBURL            string
-	LLMURL           string
-	LLMAPIKey        string
-	LLMModel         string
-	EmbedModel       string
-	EmbedDim         int
-	QuietThreshold   int
-	TopicCron        string
-	NewcomerTimeout  time.Duration
-	LogPath          string
+	TGToken            string
+	AdminIDs           []int64
+	ChatIDs            []int64
+	DBURL              string
+	LLMURL             string
+	LLMAPIKey          string
+	LLMModel           string
+	EmbedModel         string
+	EmbedDim           int
+	QuietThreshold     int
+	TopicCron          string
+	NewcomerTimeout    time.Duration
+	LogPath            string
+	SearXNGURL         string
+	SearXNGMax         int
+	GateEnabled        bool
+	CaptchaTimeout     time.Duration
+	CaptchaMaxAttempts int
+	Probation          time.Duration
 }
 
 // Load читает env. Необходимые переменные — фаталят при отсутствии.
 func Load() (*Config, error) {
 	c := &Config{
-		TGToken:         os.Getenv("PHPBOT_TG_TOKEN"),
-		DBURL:           os.Getenv("PHPBOT_DB_URL"),
-		LLMURL:          envOr("PHPBOT_LLM_URL", "https://api.vsellm.ru/v1"),
-		LLMAPIKey:       os.Getenv("PHPBOT_LLM_API_KEY"),
-		LLMModel:        envOr("PHPBOT_LLM_MODEL", "google/gemini-2.5-flash"),
-		EmbedModel:      envOr("PHPBOT_EMBED_MODEL", "text-embedding-3-small"),
-		EmbedDim:        envInt("PHPBOT_EMBED_DIM", 1536),
-		QuietThreshold:  envInt("PHPBOT_QUIET_THRESHOLD", 20),
-		TopicCron:       envOr("PHPBOT_TOPIC_CRON", "0 12,20 * * *"),
-		NewcomerTimeout: envDur("PHPBOT_NEWCOMER_TIMEOUT", 5*time.Minute),
-		LogPath:         os.Getenv("PHPBOT_LOG_PATH"),
+		TGToken:            os.Getenv("PHPBOT_TG_TOKEN"),
+		DBURL:              os.Getenv("PHPBOT_DB_URL"),
+		LLMURL:             envOr("PHPBOT_LLM_URL", "https://api.vsellm.ru/v1"),
+		LLMAPIKey:          os.Getenv("PHPBOT_LLM_API_KEY"),
+		LLMModel:           envOr("PHPBOT_LLM_MODEL", "google/gemini-2.5-flash"),
+		EmbedModel:         envOr("PHPBOT_EMBED_MODEL", "text-embedding-3-small"),
+		EmbedDim:           envInt("PHPBOT_EMBED_DIM", 1536),
+		QuietThreshold:     envInt("PHPBOT_QUIET_THRESHOLD", 20),
+		TopicCron:          envOr("PHPBOT_TOPIC_CRON", "0 12,20 * * *"),
+		NewcomerTimeout:    envDur("PHPBOT_NEWCOMER_TIMEOUT", 5*time.Minute),
+		LogPath:            os.Getenv("PHPBOT_LOG_PATH"),
+		SearXNGURL:         envOr("PHPBOT_SEARXNG_URL", ""),
+		SearXNGMax:         envInt("PHPBOT_SEARXNG_MAX", 5),
+		GateEnabled:        envBool("PHPBOT_GATE_ENABLED", true),
+		CaptchaTimeout:     envDur("PHPBOT_CAPTCHA_TIMEOUT", 3*time.Minute),
+		CaptchaMaxAttempts: envInt("PHPBOT_CAPTCHA_MAX_ATTEMPTS", 3),
+		Probation:          time.Duration(envInt("PHPBOT_PROBATION_HOURS", 6)) * time.Hour,
 	}
 	c.AdminIDs = envInt64List("PHPBOT_ADMIN_IDS")
 	c.ChatIDs = envInt64List("PHPBOT_CHAT_ID")
@@ -98,4 +110,16 @@ func envInt64List(key string) []int64 {
 		}
 	}
 	return out
+}
+
+func envBool(key string, def bool) bool {
+	if v := os.Getenv(key); v != "" {
+		switch strings.ToLower(v) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+	return def
 }

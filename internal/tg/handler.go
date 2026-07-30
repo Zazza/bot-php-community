@@ -22,11 +22,11 @@ const replyTimeout = 90 * time.Second
 
 // Handlers — центральная диспетчеризация update. Содержит ссылки на все домены.
 type Handlers struct {
-	api          *bot.Bot
-	chatIDs      map[int64]struct{}
-	botUserID    int64  // собственный id бота, чтобы отличать reply-to-bot
-	botUsername  string // ник бота для @упоминаний
-	primaryChatID int64 // первый групповой чат — источник контекста для ответов в ЛС
+	api           *bot.Bot
+	chatIDs       map[int64]struct{}
+	botUserID     int64  // собственный id бота, чтобы отличать reply-to-bot
+	botUsername   string // ник бота для @упоминаний
+	primaryChatID int64  // первый групповой чат — источник контекста для ответов в ЛС
 
 	moderation *moderation.Flow
 	users      *users.Repository
@@ -93,6 +93,14 @@ func (h *Handlers) OnMessage(ctx context.Context, b *bot.Bot, upd *models.Update
 		return
 	}
 
+	// 1b. left_chat_member — cleanup orphan-капчи (напр. новичка снёс Combot).
+	if msg.LeftChatMember != nil {
+		if _, ok := h.chatIDs[chatID]; ok {
+			h.moderation.OnLeftMember(ctx, chatID, msg.LeftChatMember.ID)
+		}
+		return
+	}
+
 	// ЛС: отвечаем только админам, контекст берём из группового чата.
 	if msg.Chat.Type == "private" {
 		h.pmAnswer(ctx, msg)
@@ -119,37 +127,31 @@ func (h *Handlers) OnMessage(ctx context.Context, b *bot.Bot, upd *models.Update
 	if text != "" && msg.From != nil {
 		h.saveMessage(ctx, msg, text)
 
-		// 3a. Ответ новичка на вопрос модерации (если он в pending).
-		if h.moderation.HandleAnswer(ctx, chatID, msg.From.ID, msg.From.Username, text) {
-			return // сообщение поглощено модерацией
-		}
-
-		// 3b. PHP-триггеры: @упоминание бота или reply на сообщение бота.
+		// 3a. PHP-триггеры: @упоминание бота или reply на сообщение бота.
 		if h.isAddressedToBot(msg, text) {
 			h.answerChat(ctx, chatID, msg, stripBotMention(text, h.botUserID))
 		}
 	}
 }
 
-// OnCallbackQuery — кнопки модерации.
+// OnCallbackQuery — кнопки капчи новичка (gate:<id>:<opt>).
 func (h *Handlers) OnCallbackQuery(ctx context.Context, b *bot.Bot, upd *models.Update) {
 	cb := upd.CallbackQuery
 	if cb == nil {
 		return
 	}
-	alert, _ := h.moderation.HandleCallback(ctx, cb)
-	if alert != "" {
-		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-			CallbackQueryID: cb.ID, Text: alert, ShowAlert: true,
-		})
+	if strings.HasPrefix(cb.Data, "gate:") {
+		alert := h.moderation.HandleGateCallback(ctx, cb)
+		if alert != "" {
+			_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+				CallbackQueryID: cb.ID, Text: alert,
+			})
+		}
+		return
 	}
-	// Снимаем «часики» с кнопки.
-	if cb.Message.Message != nil {
-		_, _ = b.EditMessageReplyMarkup(ctx, &bot.EditMessageReplyMarkupParams{
-			ChatID:    cb.Message.Message.Chat.ID,
-			MessageID: cb.Message.Message.ID,
-		})
-	}
+	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+		CallbackQueryID: cb.ID, Text: "—",
+	})
 }
 
 // dispatchCommand маршрутизирует slash-команды.

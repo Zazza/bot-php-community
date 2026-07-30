@@ -17,9 +17,9 @@ func TestParseVerdict(t *testing.T) {
 		{"markdown_wrapped", "```json\n{\"verdict\":\"bot\",\"reason\":\"x\"}\n```", "bot"},
 		{"bare_codeblock", "```\n{\"verdict\":\"human\",\"reason\":\"x\"}\n```", "human"},
 		{"with_leading_spaces", "  {\"verdict\":\"human\",\"reason\":\"ok\"}  ", "human"},
-		{"invalid_json", `not a json`, "unclear"},        // fail-safe
+		{"invalid_json", `not a json`, "unclear"},             // fail-safe
 		{"unknown_verdict", `{"verdict":"alien"}`, "unclear"}, // fail-safe
-		{"missing_field", `{"reason":"x"}`, "unclear"},   // fail-safe
+		{"missing_field", `{"reason":"x"}`, "unclear"},        // fail-safe
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

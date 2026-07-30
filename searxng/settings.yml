@@ -1,0 +1,10 @@
+use_default_settings: true
+
+server:
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false          # antibot-limiter OFF — инстанс приватный, ходит только наш бот
+  public_instance: false  # не светимся в публичных списках инстансов
+
+search:
+  formats: [html, json]   # JSON API нужен боту (по умолчанию выключен!)

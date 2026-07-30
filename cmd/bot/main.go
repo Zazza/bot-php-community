@@ -23,6 +23,7 @@ import (
 	"phpbot/internal/tg"
 	"phpbot/internal/topics"
 	"phpbot/internal/users"
+	"phpbot/internal/websearch"
 )
 
 func main() {
@@ -62,7 +63,14 @@ func main() {
 	vecRepo.Start(ctx, 2)
 	defer vecRepo.Stop()
 
-	answerer := chat.New(llmClient, msgRepo, vecRepo)
+	// Веб-поиск (SearXNG). Пустой URL → выключен (non-fatal).
+	var webSearcher *websearch.Searcher
+	if cfg.SearXNGURL != "" {
+		webSearcher = websearch.New(cfg.SearXNGURL, cfg.SearXNGMax)
+		slog.Info("web search enabled", "url", cfg.SearXNGURL, "max", cfg.SearXNGMax)
+	}
+
+	answerer := chat.New(llmClient, msgRepo, vecRepo, webSearcher)
 	moderRepo := moderation.NewRepository(dbx)
 
 	b, err := bot.New(cfg.TGToken, bot.WithDefaultHandler(func(_ context.Context, _ *bot.Bot, _ *models.Update) {}))
@@ -80,7 +88,9 @@ func main() {
 
 	poster := tg.NewPoster(b)
 	moderFlow := moderation.NewFlow(b, llmClient, moderRepo, userRepo,
-		cfg.NewcomerTimeout, cfg.AdminIDs)
+		cfg.GateEnabled, cfg.CaptchaTimeout, cfg.CaptchaMaxAttempts, cfg.Probation, cfg.AdminIDs)
+	moderFlow.Start(ctx)
+	defer moderFlow.Stop()
 	topicsSched := topics.New(dbx, llmClient, msgRepo, poster, cfg.ChatIDs, cfg.QuietThreshold)
 	digester := topics.NewDigester(dbx, llmClient, msgRepo, poster, cfg.ChatIDs)
 

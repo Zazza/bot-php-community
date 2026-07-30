@@ -20,6 +20,19 @@ services:
       retries: 5
     networks: [phpbot-net]
 
+  # SearXNG — приватный self-hosted веб-поиск для актуализации ответов бота.
+  # Без внешнего порта: ходит только бот по внутренней сети. JSON API включён в settings.yml.
+  searxng:
+    image: searxng/searxng:latest
+    container_name: php-bot-searxng
+    restart: unless-stopped
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080/
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-phpbot-local-searxng-secret}
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks: [phpbot-net]
+
   bot:
     build: .
     container_name: php-bot
@@ -40,6 +53,14 @@ services:
       PHPBOT_LLM_MODEL: ${PHPBOT_LLM_MODEL:-google/gemini-2.5-flash}
       PHPBOT_EMBED_MODEL: ${PHPBOT_EMBED_MODEL:-text-embedding-3-small}
       PHPBOT_EMBED_DIM: ${PHPBOT_EMBED_DIM:-1536}
+      # Веб-поиск (SearXNG) — по внутренней сети. Пусто → веб выключен.
+      PHPBOT_SEARXNG_URL: http://searxng:8080
+      PHPBOT_SEARXNG_MAX: ${PHPBOT_SEARXNG_MAX:-5}
+      # Анти-спам гейт новичков: капча (математика) + линк-провация.
+      PHPBOT_GATE_ENABLED: ${PHPBOT_GATE_ENABLED:-true}
+      PHPBOT_CAPTCHA_TIMEOUT: ${PHPBOT_CAPTCHA_TIMEOUT:-3m}
+      PHPBOT_CAPTCHA_MAX_ATTEMPTS: ${PHPBOT_CAPTCHA_MAX_ATTEMPTS:-3}
+      PHPBOT_PROBATION_HOURS: ${PHPBOT_PROBATION_HOURS:-6}
       # Поведение
       PHPBOT_QUIET_THRESHOLD: ${PHPBOT_QUIET_THRESHOLD:-20}
       PHPBOT_TOPIC_CRON: ${PHPBOT_TOPIC_CRON:-0 12,20 * * *}
