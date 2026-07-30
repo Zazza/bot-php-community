@@ -36,4 +36,5 @@ const (
 	About   = "about.txt"
 	Welcome = "welcome.txt"
 	FAQ     = "faq.txt"
+	Search  = "search.txt"
 )

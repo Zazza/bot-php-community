@@ -190,6 +190,37 @@ func (a *Answerer) About(ctx context.Context, chatID int64, username string, sin
 	return resp, nil
 }
 
+// TopicOverview собирает краткий обзор обсуждения темы по релевантным сообщениям.
+// Данные (тексты) идут отдельным user-сообщением — системный промпт статичен
+// (анти-инъекция: инструкции участников в их тексте не исполняются). Нумерация [N]
+// в контексте задаётся здесь и должна совпадать с нумерацией списка источников у вызывающего.
+func (a *Answerer) TopicOverview(ctx context.Context, topic string, msgs []messages.Message) (string, error) {
+	if len(msgs) == 0 {
+		return "Нет сообщений по теме «" + topic + "».", nil
+	}
+	var b strings.Builder
+	for i, m := range msgs {
+		who := m.Username
+		if who == "" {
+			who = "user"
+		}
+		fmt.Fprintf(&b, "[%d] %s (%s): %s\n", i+1, who, m.TS.Format("02.01.06 15:04"), m.Text)
+	}
+	system := prompts.Get(prompts.Search)
+	resp, inTok, outTok, err := a.llm.Chat(ctx, []llm.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: b.String()},
+	})
+	if err != nil {
+		return "", fmt.Errorf("search overview llm: %w", err)
+	}
+	slog.Info("search overview", "topic", topic, "ctx", len(msgs), "in", inTok, "out", outTok)
+	if len(resp) > maxAnswerLen {
+		resp = resp[:maxAnswerLen] + "\n…(обрезано)"
+	}
+	return resp, nil
+}
+
 // buildContextBlock формирует текстовый блок контекста для системного промпта.
 func buildContextBlock(rag []messages.Message, recent []messages.Message, web []websearch.Result) string {
 	var b strings.Builder

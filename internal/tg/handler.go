@@ -342,22 +342,82 @@ func (h *Handlers) cmdSearch(ctx context.Context, replyChatID, dataChatID int64,
 		_ = SendMessage(ctx, h.api, replyChatID, "Ошибка поиска: не удалось векторизовать запрос.")
 		return
 	}
-	rows, err := h.vec.SearchFiltered(ctx, dataChatID, qvec, 10, username, p.since, p.until)
+	rows, err := h.vec.SearchFiltered(ctx, dataChatID, qvec, 12, username, p.since, p.until)
 	if err != nil {
 		_ = SendMessage(ctx, h.api, replyChatID, "Ошибка поиска по истории.")
 		return
 	}
+	msgs := substantiveMessages(rows)
+	if len(msgs) == 0 {
+		_ = SendMessage(ctx, h.api, replyChatID, "🔍 По теме «"+query+"» ничего содержательного в истории не нашёл.")
+		return
+	}
+	_ = SendMessage(ctx, h.api, replyChatID, "⏳ Собираю обзор по теме «"+query+"»...")
+	go func(replyChatID int64, query, username, label string, hasFilter bool, msgs []messages.Message) {
+		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
+		defer cancel()
+		header := "🔍 Обзор по теме «" + query + "»"
+		if username != "" {
+			header += ", автор @" + username
+		}
+		if hasFilter {
+			header += ", " + label
+		}
+		header += ":\n\n"
+		overview, err := h.answerer.TopicOverview(ctxBg, query, msgs)
+		if err != nil {
+			slog.Warn("search overview", "err", err, "topic", query)
+			_ = SendMessage(ctxBg, h.api, replyChatID, header+numberedCitations(msgs))
+			return
+		}
+		_ = SendMessage(ctxBg, h.api, replyChatID, header+overview+"\n\n📖 Источники:\n"+numberedCitations(msgs))
+	}(replyChatID, query, username, p.label, p.since != nil || p.until != nil, msgs)
+}
+
+// substantiveMessages фильтрует результаты поиска до содержательных: убирает короткие
+// (<30 рун) и дубликаты по тексту (lowercased+trimmed). rows уже отсортированы по
+// убыванию сходства, поэтому первые N уникальных — наиболее релевантные. Кап 10.
+// Порядок сохраняется — он задаёт нумерацию [N] для обзора и списка источников.
+func substantiveMessages(rows []messages.SearchMessage) []messages.Message {
+	out := make([]messages.Message, 0, 10)
+	seen := make(map[string]struct{}, len(rows))
+	for _, r := range rows {
+		if len(out) >= 10 {
+			break
+		}
+		if len([]rune(r.Text)) < 30 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(r.Text))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, r.Message)
+	}
+	return out
+}
+
+// numberedCitations формирует список источников: «N. [дд.мм чч:мм] автор: текст».
+// Текст обрезается до 120 рун. Нумерация 1..N совпадает с нумерацией [N] в контексте
+// обзорного промпта (тот же порядок msgs).
+func numberedCitations(msgs []messages.Message) string {
 	var b strings.Builder
-	b.WriteString("🔍 По запросу «" + query + "»")
-	if username != "" {
-		b.WriteString(", автор @" + username)
+	for i, m := range msgs {
+		who := m.Username
+		if who == "" {
+			who = "user"
+		}
+		text := m.Text
+		if r := []rune(text); len(r) > 120 {
+			text = string(r[:120]) + "…"
+		}
+		fmt.Fprintf(&b, "%d. [%s] %s: %s\n", i+1, m.TS.Format("02.01 15:04"), who, text)
 	}
-	if p.since != nil || p.until != nil {
-		b.WriteString(", " + p.label)
-	}
-	b.WriteString("\n\n")
-	b.WriteString(messages.FormatSearchResult(rows))
-	_ = SendMessage(ctx, h.api, replyChatID, b.String())
+	return b.String()
 }
 
 func (h *Handlers) cmdExpert(ctx context.Context, replyChatID, dataChatID int64, args string) {
