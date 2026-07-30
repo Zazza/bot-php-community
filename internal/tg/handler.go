@@ -33,6 +33,11 @@ const spamSaveTimeout = 15 * time.Second
 // expertMaxDist — косинусный радиус «по теме» для /expert (~0.65 сходства).
 const expertMaxDist = 0.35
 
+// searchMinLen — минимальная длина (в символах) сообщения для /search. Отсекает
+// bare-токены («yii3», «yii2») на уровне SQL, чтобы они не забивали top-K по косинусу
+// и не вытесняли содержательные сообщения из пула ранжирования.
+const searchMinLen = 30
+
 // Handlers — центральная диспетчеризация update. Содержит ссылки на все домены.
 type Handlers struct {
 	api           *bot.Bot
@@ -342,7 +347,7 @@ func (h *Handlers) cmdSearch(ctx context.Context, replyChatID, dataChatID int64,
 		_ = SendMessage(ctx, h.api, replyChatID, "Ошибка поиска: не удалось векторизовать запрос.")
 		return
 	}
-	rows, err := h.vec.SearchFiltered(ctx, dataChatID, qvec, 12, username, p.since, p.until)
+	rows, err := h.vec.SearchFiltered(ctx, dataChatID, qvec, 12, username, p.since, p.until, searchMinLen)
 	if err != nil {
 		_ = SendMessage(ctx, h.api, replyChatID, "Ошибка поиска по истории.")
 		return
@@ -374,19 +379,16 @@ func (h *Handlers) cmdSearch(ctx context.Context, replyChatID, dataChatID int64,
 	}(replyChatID, query, username, p.label, p.since != nil || p.until != nil, msgs)
 }
 
-// substantiveMessages фильтрует результаты поиска до содержательных: убирает короткие
-// (<30 рун) и дубликаты по тексту (lowercased+trimmed). rows уже отсортированы по
-// убыванию сходства, поэтому первые N уникальных — наиболее релевантные. Кап 10.
-// Порядок сохраняется — он задаёт нумерацию [N] для обзора и списка источников.
+// substantiveMessages дедуплицирует результаты поиска (lowercased+trimmed) и обрезает
+// до 10. Фильтр длины выполняется в SQL (search, minLen) — отсекает bare-токены ДО
+// ранжирования. rows уже отсортированы по убыванию сходства, поэтому первые N уникальных
+// — наиболее релевантные. Порядок сохраняется — он задаёт нумерацию [N] для обзора.
 func substantiveMessages(rows []messages.SearchMessage) []messages.Message {
 	out := make([]messages.Message, 0, 10)
 	seen := make(map[string]struct{}, len(rows))
 	for _, r := range rows {
 		if len(out) >= 10 {
 			break
-		}
-		if len([]rune(r.Text)) < 30 {
-			continue
 		}
 		key := strings.ToLower(strings.TrimSpace(r.Text))
 		if key == "" {

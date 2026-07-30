@@ -120,21 +120,25 @@ type SearchMessage struct {
 }
 
 // SearchTopK ищет top-K ближайших сообщений в чате по косинусу к вектору запроса
-// без фильтров. Тонкая обёртка над search — поведение Answerer не меняется.
+// без фильтров. Тонкая обёртка над search — поведение Answerer не меняется
+// (minLen=0 → фильтр длины отключен).
 func (v *VectorRepo) SearchTopK(ctx context.Context, chatID int64, queryVec []float32, k int) ([]SearchMessage, error) {
-	return v.search(ctx, chatID, queryVec, k, "", nil, nil)
+	return v.search(ctx, chatID, queryVec, k, "", nil, nil, 0)
 }
 
 // SearchFiltered ищет top-K по косинусу с опциональными фильтрами по автору
-// (username без @) и периоду [since, until). Пустой username и nil-границы
-// отключают соответствующие фильтры.
-func (v *VectorRepo) SearchFiltered(ctx context.Context, chatID int64, queryVec []float32, k int, username string, since, until *time.Time) ([]SearchMessage, error) {
-	return v.search(ctx, chatID, queryVec, k, username, since, until)
+// (username без @) и периоду [since, until). minLen отсекает короткие сообщения
+// ДО ранжирования (0 → отключено). Пустой username и nil-границы отключают
+// соответствующие фильтры.
+func (v *VectorRepo) SearchFiltered(ctx context.Context, chatID int64, queryVec []float32, k int, username string, since, until *time.Time, minLen int) ([]SearchMessage, error) {
+	return v.search(ctx, chatID, queryVec, k, username, since, until, minLen)
 }
 
 // search — общий движок поиска. username="" → nil-параметр (IS NULL истинно,
 // фильтр отключен). nil since/until → NULL (pgx шлёт NULL для nil *time.Time).
-func (v *VectorRepo) search(ctx context.Context, chatID int64, queryVec []float32, k int, username string, since, until *time.Time) ([]SearchMessage, error) {
+// minLen (=0 отключен) отсекает короткие сообщения ДО ранжирования, чтобы
+// bare-токены («yii3», «yii2») не забивали top-K по косинусу.
+func (v *VectorRepo) search(ctx context.Context, chatID int64, queryVec []float32, k int, username string, since, until *time.Time, minLen int) ([]SearchMessage, error) {
 	if k <= 0 {
 		k = 8
 	}
@@ -153,9 +157,10 @@ func (v *VectorRepo) search(ctx context.Context, chatID int64, queryVec []float3
 		  AND ($3::text IS NULL OR m.username = $3)
 		  AND ($4::timestamptz IS NULL OR m.ts >= $4)
 		  AND ($5::timestamptz IS NULL OR m.ts < $5)
+		  AND ($6::int = 0 OR char_length(m.text) >= $6)
 		ORDER BY e.embedding <=> $1
-		LIMIT $6
-	`, pgvector.NewVector(queryVec), chatID, userParam, since, until, k); err != nil {
+		LIMIT $7
+	`, pgvector.NewVector(queryVec), chatID, userParam, since, until, minLen, k); err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}
 	return rows, nil
