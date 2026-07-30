@@ -22,6 +22,7 @@ const (
 	aboutMaxChars           = 12000 // бюджет на сборку сообщений для портрета участника
 	alreadyDiscussedMaxDist = 0.18  // косинусное расстояние: меньше → строже; 0.18 ≈ сходство 0.82
 	faqMatchMaxDist         = 0.20  // курируемый FAQ отдаётся сразу при расстоянии вопроса ниже порога
+	askRelevanceMaxDist     = 0.50  // гейт /ask: лучший RAG-матч дальше → темы в истории нет, LLM не зовётся
 )
 
 // Answerer собирает контекст (RAG + последние сообщения + веб) и зовёт LLM.
@@ -45,10 +46,10 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 		return "Вопрос пустой.", nil
 	}
 
-	// 1. Векторизуем запрос.
+	// 1. Векторизуем запрос. qvec==nil (ошибка) ниже триггерит гейт → отбой без LLM.
 	qvec, err := a.vec.EmbedText(ctx, q)
 	if err != nil {
-		slog.Warn("embed query failed, answering without RAG", "err", err)
+		slog.Warn("embed query failed", "err", err)
 	}
 
 	// 1b. FAQ fast-path: курируемый ответ отдаётся сразу, минуя RAG и «Уже обсуждали».
@@ -77,6 +78,14 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 				rag = append(rag, r.Message)
 			}
 		}
+	}
+
+	// 2b. Релевантность-гейт: бот отвечает только из истории чата. Если векторизации
+	// нет (embed упал) или лучший матч далёк — LLM не зовём (экономия + анти-генерика),
+	// отбой к живым участникам. web-поиск тоже пропускаем — он не нужен для оффтопа.
+	if !relevantEnough(topSearch, askRelevanceMaxDist) {
+		slog.Info("chat skip: not in chat history", "chat_id", chatID, "embed_failed", qvec == nil)
+		return notInHistoryReply(qvec == nil), nil
 	}
 
 	// 3. Последние N сообщений (для актуального контекста).
@@ -114,6 +123,12 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 	}
 	slog.Info("chat answer", "chat_id", chatID, "in", inTok, "out", outTok,
 		"rag_len", len(rag), "recent_len", len(recent), "web_len", len(web))
+
+	// 5b. LLM вернул SKIP — контекст прошёл гейт, но ответа в нём нет: отбой к людям.
+	if isSkip(resp) {
+		slog.Info("chat skip: llm returned skip", "chat_id", chatID)
+		return notInHistoryReply(false), nil
+	}
 
 	// 6. «Уже обсуждали»: если на похожий вопрос уже был ответ — prepend ссылки.
 	// Non-fatal: NextAfter упал → отвечаем без prepend.
@@ -242,6 +257,25 @@ func buildContextBlock(rag []messages.Message, recent []messages.Message, web []
 		return "(история пуста — это первое обращение)"
 	}
 	return b.String()
+}
+
+// relevantEnough — прошёл ли лучший RAG-матч порог релевантности. False → тема в
+// истории чата не обсуждалась, бот не отвечает (экономия LLM-вызова + анти-генерика).
+func relevantEnough(top []messages.SearchMessage, maxDist float64) bool {
+	return len(top) > 0 && top[0].Distance <= maxDist
+}
+
+// isSkip — LLM вернул SKIP (контекст прошёл гейт, но не отвечает на вопрос).
+func isSkip(resp string) bool {
+	return strings.EqualFold(strings.TrimSpace(resp), "SKIP")
+}
+
+// notInHistoryReply — фиксированный отбой, когда ответить из истории нельзя.
+func notInHistoryReply(embedFailed bool) string {
+	if embedFailed {
+		return "⚠️ Не получилось проверить историю чата, попробуй ещё раз."
+	}
+	return "В истории чата это не обсуждали — лучше спросить у участников 🙋"
 }
 
 // FormatRecentForDigest — экспорт FormatContext-подобной утилиты для дайджеста.

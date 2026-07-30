@@ -18,6 +18,7 @@ type Config struct {
 	LLMURL             string
 	LLMAPIKey          string
 	LLMModel           string
+	LLMModelCheap      string
 	EmbedModel         string
 	EmbedDim           int
 	QuietThreshold     int
@@ -49,6 +50,7 @@ func Load() (*Config, error) {
 		LLMURL:             envOr("PHPBOT_LLM_URL", "https://api.vsellm.ru/v1"),
 		LLMAPIKey:          os.Getenv("PHPBOT_LLM_API_KEY"),
 		LLMModel:           envOr("PHPBOT_LLM_MODEL", "google/gemini-2.5-flash"),
+		LLMModelCheap:      envOr("PHPBOT_LLM_MODEL_CHEAP", "openai/gpt-4o-mini"),
 		EmbedModel:         envOr("PHPBOT_EMBED_MODEL", "text-embedding-3-small"),
 		EmbedDim:           envInt("PHPBOT_EMBED_DIM", 1536),
 		QuietThreshold:     envInt("PHPBOT_QUIET_THRESHOLD", 20),

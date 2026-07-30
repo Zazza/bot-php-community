@@ -36,7 +36,8 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("config loaded",
-		"chats", cfg.ChatIDs, "admins", cfg.AdminIDs, "model", cfg.LLMModel,
+		"chats", cfg.ChatIDs, "admins", cfg.AdminIDs,
+		"model", cfg.LLMModel, "model_cheap", cfg.LLMModelCheap,
 		"embed_model", cfg.EmbedModel, "embed_dim", cfg.EmbedDim)
 
 	// fail-fast: критичный промпт должен быть встроен.
@@ -59,7 +60,8 @@ func main() {
 	}
 	defer dbx.Close()
 
-	llmClient := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModel, 2048)
+	llmClient := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModel, 2048)     // умная: модерация-судья + анти-спам (safety/решения)
+	llmCheap := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModelCheap, 2048) // дешёвая: ответы/faq/digest/темы
 	embedder := llm.NewEmbedder(cfg.LLMURL, cfg.LLMAPIKey, cfg.EmbedModel)
 
 	msgRepo := messages.New(dbx)
@@ -76,9 +78,9 @@ func main() {
 	}
 
 	faqRepo := faq.NewRepo(dbx)
-	faqBuilder := faq.NewBuilder(dbx, llmClient, msgRepo, faqRepo, cfg.ChatIDs)
+	faqBuilder := faq.NewBuilder(dbx, llmCheap, msgRepo, faqRepo, cfg.ChatIDs)
 
-	answerer := chat.New(llmClient, msgRepo, vecRepo, webSearcher, faqRepo)
+	answerer := chat.New(llmCheap, msgRepo, vecRepo, webSearcher, faqRepo)
 	moderRepo := moderation.NewRepository(dbx)
 
 	b, err := bot.New(cfg.TGToken, bot.WithDefaultHandler(func(_ context.Context, _ *bot.Bot, _ *models.Update) {}))
@@ -117,8 +119,8 @@ func main() {
 		defer voteKick.Stop()
 	}
 
-	topicsSched := topics.New(dbx, llmClient, msgRepo, poster, cfg.ChatIDs, cfg.QuietThreshold)
-	digester := topics.NewDigester(dbx, llmClient, msgRepo, poster, cfg.ChatIDs)
+	topicsSched := topics.New(dbx, llmCheap, msgRepo, poster, cfg.ChatIDs, cfg.QuietThreshold)
+	digester := topics.NewDigester(dbx, llmCheap, msgRepo, poster, cfg.ChatIDs)
 
 	handlers := tg.NewHandlers(tg.HandlersDeps{
 		API: b, ChatIDs: cfg.ChatIDs, BotUserID: me.ID,
