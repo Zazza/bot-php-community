@@ -23,7 +23,6 @@ const (
 	aboutMaxChars           = 12000 // бюджет на сборку сообщений для портрета участника
 	alreadyDiscussedMaxDist = 0.18  // косинусное расстояние: меньше → строже; 0.18 ≈ сходство 0.82
 	faqMatchMaxDist         = 0.20  // курируемый FAQ отдаётся сразу при расстоянии вопроса ниже порога
-	askRelevanceMaxDist     = 0.50  // гейт /ask: лучший RAG-матч дальше → темы в истории нет, LLM не зовётся
 	ragMinLen               = 30   // мин. длина сообщения для RAG /ask: короткий мусор не забивает top-K
 )
 
@@ -42,7 +41,7 @@ func New(llm *llm.LLMClient, msgs *messages.Repository, vec *messages.VectorRepo
 }
 
 // Answer генерирует ответ на вопрос в контексте чата.
-func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question string, engage bool) (string, error) {
+func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question string) (string, error) {
 	q := strings.TrimSpace(question)
 	if q == "" {
 		return "Вопрос пустой.", nil
@@ -82,15 +81,13 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 		}
 	}
 
-	// 2b. Релевантность-гейт: бот отвечает только из истории чата. Если векторизации
-	// нет (embed упал) или лучший матч далёк — LLM не зовём (экономия + анти-генерика),
-	// отбой к живым участникам. web-поиск тоже пропускаем — он не нужен для оффтопа.
-	// НЕ применяется при engage (reply-на-бота): человек обращается к сказанному ботом,
-	// контекст уже есть в последних сообщениях — бот обязан вступить в диалог.
-	if !engage && !relevantEnough(topSearch, askRelevanceMaxDist) {
-		slog.Info("chat skip: not in chat history", "chat_id", chatID,
-			"embed_failed", qvec == nil, "best_dist", bestDist(topSearch), "q_len", len(q))
-		return notInHistoryReply(qvec == nil), nil
+	// 2b. Жёсткий косинус-гейт убран: дешёвая модель сама решает по контексту (промпт
+	// требует «отвечать только из контекста, иначе SKIP»), а crude-порог 0.50 рубил
+	// реальные серые совпадения и плодил ложные «не обсуждали» (особенно в ЛС). Только
+	// если embed упал (нет вектора → RAG невозможен) — отбой как transient-ошибка.
+	if qvec == nil {
+		slog.Info("chat skip: embed failed", "chat_id", chatID)
+		return notInHistoryReply(true), nil
 	}
 
 	// 3. Последние N сообщений (для актуального контекста).
@@ -128,7 +125,7 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 	}
 	slog.Info("chat answer", "chat_id", chatID, "in", inTok, "out", outTok,
 		"rag_len", len(rag), "recent_len", len(recent), "web_len", len(web),
-		"best_dist", bestDist(topSearch), "q_len", len(q), "engage", engage)
+		"best_dist", bestDist(topSearch), "q_len", len(q))
 
 	// 5b. LLM вернул SKIP — контекст прошёл гейт, но ответа в нём нет: отбой к людям.
 	if isSkip(resp) {
@@ -266,12 +263,6 @@ func buildContextBlock(rag []messages.Message, recent []messages.Message, web []
 		return "(история пуста — это первое обращение)"
 	}
 	return b.String()
-}
-
-// relevantEnough — прошёл ли лучший RAG-матч порог релевантности. False → тема в
-// истории чата не обсуждалась, бот не отвечает (экономия LLM-вызова + анти-генерика).
-func relevantEnough(top []messages.SearchMessage, maxDist float64) bool {
-	return len(top) > 0 && top[0].Distance <= maxDist
 }
 
 // bestDist — дистанция лучшего RAG-матча (-1, если пусто), только для логов/диагностики.

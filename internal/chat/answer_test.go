@@ -1,34 +1,6 @@
 package chat
 
-import (
-	"testing"
-
-	"phpbot/internal/messages"
-)
-
-func TestRelevantEnough(t *testing.T) {
-	const maxDist = 0.50
-	cases := []struct {
-		name string
-		top  []messages.SearchMessage
-		want bool
-	}{
-		{"empty no history", nil, false},
-		{"close match", []messages.SearchMessage{{Distance: 0.10}}, true},
-		{"at threshold", []messages.SearchMessage{{Distance: 0.50}}, true},
-		{"just over threshold", []messages.SearchMessage{{Distance: 0.51}}, false},
-		{"far off-topic", []messages.SearchMessage{{Distance: 0.90}}, false},
-		{"best close second far", []messages.SearchMessage{{Distance: 0.20}, {Distance: 0.80}}, true},
-		{"best far only", []messages.SearchMessage{{Distance: 0.80}}, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := relevantEnough(c.top, maxDist); got != c.want {
-				t.Fatalf("relevantEnough(%v, %v) = %v, want %v", c.top, maxDist, got, c.want)
-			}
-		})
-	}
-}
+import "testing"
 
 func TestIsSkip(t *testing.T) {
 	cases := []struct {

@@ -925,11 +925,10 @@ func (h *Handlers) answerChat(ctx context.Context, replyChatID, dataChatID int64
 		_ = SendMessage(ctx, h.api, replyChatID, "Спроси что-нибудь конкретнее 🙂")
 		return
 	}
-	engage := replyToBot(msg, h.botUserID) // reply-на-бота обходит жёсткий гейт
 	go func() {
 		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
 		defer cancel()
-		resp, err := h.answerer.Answer(ctxBg, dataChatID, replyUsername(msg.From), question, engage)
+		resp, err := h.answerer.Answer(ctxBg, dataChatID, replyUsername(msg.From), question)
 		if err != nil {
 			slog.Error("answer chat", "err", err)
 			_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось получить ответ, попробуй позже.")
@@ -965,7 +964,7 @@ func (h *Handlers) pmAnswer(ctx context.Context, msg *models.Message) {
 	go func() {
 		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
 		defer cancel()
-		resp, err := h.answerer.Answer(ctxBg, h.primaryChatID, asker, q, false)
+		resp, err := h.answerer.Answer(ctxBg, h.primaryChatID, asker, q)
 		if err != nil {
 			slog.Error("pm answer", "err", err)
 			_ = SendMessage(ctxBg, h.api, msg.Chat.ID, "Не удалось получить ответ, попробуй позже.")
