@@ -156,11 +156,14 @@ func (r *Repository) ByUsername(ctx context.Context, chatID int64, username stri
 // Имя: users.username (настоящий @handle), fallback messages.username. user_id=0
 // (без атрибуции) исключается.
 func (r *Repository) ExpertByKeyword(ctx context.Context, chatID int64, topic string, limit int) ([]Expert, error) {
-	topic = strings.TrimSpace(topic)
+	normalized := normalizeTopic(topic)
+	if len(normalized) < 2 {
+		return nil, nil // слишком коротко/общо — не ищем (иначе паттерн '%%' совпадёт со всем)
+	}
 	if limit <= 0 {
 		limit = 5
 	}
-	pattern := "%" + escapeILIKE(topic) + "%"
+	pattern := "%" + normalized + "%"
 	var rows []Expert
 	if err := r.db.SelectContext(ctx, &rows, `
 		SELECT m.user_id,
@@ -168,7 +171,8 @@ func (r *Repository) ExpertByKeyword(ctx context.Context, chatID int64, topic st
 		       count(*) AS cnt
 		FROM messages m
 		LEFT JOIN users u ON u.tg_user_id = m.user_id
-		WHERE m.chat_id = $1 AND m.user_id <> 0 AND m.text ILIKE $2 ESCAPE '\'
+		WHERE m.chat_id = $1 AND m.user_id <> 0
+		  AND regexp_replace(lower(m.text), '[^0-9a-zа-яё]', '', 'g') ILIKE $2
 		GROUP BY m.user_id
 		ORDER BY cnt DESC
 		LIMIT $3
@@ -178,10 +182,18 @@ func (r *Repository) ExpertByKeyword(ctx context.Context, chatID int64, topic st
 	return rows, nil
 }
 
-// escapeILIKE экранирует спецсимволы шаблона ILIKE (%, _) и сам escape-символ (\),
-// чтобы тема искалась буквально, а не как glob-шаблон.
-func escapeILIKE(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+// normalizeTopic приводит тему к каноничному виду для keyword-поиска: нижний регистр,
+// только буквы/цифры (латиница + кириллица), без разделителей. Так «yii3», «yii 3»,
+// «Yii-3» совпадают. Должно соответствовать regexp_replace(...) в SQL ExpertByKeyword.
+func normalizeTopic(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r >= 'а' && r <= 'я', r == 'ё':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // LastByUsername находит id пользователя и текст его последнего сообщения по @username.
