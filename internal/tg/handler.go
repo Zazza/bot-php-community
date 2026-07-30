@@ -934,7 +934,9 @@ func (h *Handlers) answerChat(ctx context.Context, replyChatID, dataChatID int64
 			_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось получить ответ, попробуй позже.")
 			return
 		}
-		_ = SendMessage(ctxBg, h.api, replyChatID, resp)
+		if resp != "" { // пустой ответ (SKIP/не нашёл) — промолчим, «не обсуждали» не выводим
+			_ = SendMessage(ctxBg, h.api, replyChatID, resp)
+		}
 	}()
 }
 
@@ -970,7 +972,9 @@ func (h *Handlers) pmAnswer(ctx context.Context, msg *models.Message) {
 			_ = SendMessage(ctxBg, h.api, msg.Chat.ID, "Не удалось получить ответ, попробуй позже.")
 			return
 		}
-		_ = SendMessage(ctxBg, h.api, msg.Chat.ID, resp)
+		if resp != "" { // пустой ответ (SKIP/не нашёл) — промолчим
+			_ = SendMessage(ctxBg, h.api, msg.Chat.ID, resp)
+		}
 	}()
 }
 

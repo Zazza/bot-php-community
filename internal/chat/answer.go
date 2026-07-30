@@ -87,7 +87,7 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 	// если embed упал (нет вектора → RAG невозможен) — отбой как transient-ошибка.
 	if qvec == nil {
 		slog.Info("chat skip: embed failed", "chat_id", chatID)
-		return notInHistoryReply(true), nil
+		return "", nil // embed упал — RAG невозможен, промолчим
 	}
 
 	// 3. Последние N сообщений (для актуального контекста).
@@ -127,10 +127,10 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 		"rag_len", len(rag), "recent_len", len(recent), "web_len", len(web),
 		"best_dist", bestDist(topSearch), "q_len", len(q))
 
-	// 5b. LLM вернул SKIP — контекст прошёл гейт, но ответа в нём нет: отбой к людям.
+	// 5b. LLM вернул SKIP — по теме в истории нет: промолчим (лучше тишина, чем «не обсуждали»).
 	if isSkip(resp) {
 		slog.Info("chat skip: llm returned skip", "chat_id", chatID)
-		return notInHistoryReply(false), nil
+		return "", nil
 	}
 
 	// 6. «Уже обсуждали»: если на похожий вопрос уже был ответ — prepend ссылки.
@@ -276,14 +276,6 @@ func bestDist(top []messages.SearchMessage) float64 {
 // isSkip — LLM вернул SKIP (контекст прошёл гейт, но не отвечает на вопрос).
 func isSkip(resp string) bool {
 	return strings.EqualFold(strings.TrimSpace(resp), "SKIP")
-}
-
-// notInHistoryReply — фиксированный отбой, когда ответить из истории нельзя.
-func notInHistoryReply(embedFailed bool) string {
-	if embedFailed {
-		return "⚠️ Не получилось проверить историю чата, попробуй ещё раз."
-	}
-	return "В истории чата это не обсуждали — лучше спросить у участников 🙋"
 }
 
 // sourceLink строит прямую ссылку на сообщение супергруппы: t.me/c/<internal_id>/<msg_id>.
