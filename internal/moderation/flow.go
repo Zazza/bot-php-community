@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"phpbot/internal/llm"
+	"phpbot/internal/messages"
 	"phpbot/internal/users"
 )
 
@@ -18,6 +19,7 @@ type Flow struct {
 	llm      *llm.LLMClient
 	repo     *Repository
 	users    *users.Repository
+	msgs     *messages.Repository
 	adminIDs map[int64]struct{}
 
 	gateEnabled bool
@@ -30,7 +32,7 @@ type Flow struct {
 }
 
 // NewFlow создаёт Flow.
-func NewFlow(api *bot.Bot, llm *llm.LLMClient, repo *Repository, usersRepo *users.Repository,
+func NewFlow(api *bot.Bot, llm *llm.LLMClient, repo *Repository, usersRepo *users.Repository, msgsRepo *messages.Repository,
 	gateEnabled bool, captchaTimeout time.Duration, maxAttempts int, probation time.Duration,
 	adminIDs []int64) *Flow {
 	amap := make(map[int64]struct{}, len(adminIDs))
@@ -42,6 +44,7 @@ func NewFlow(api *bot.Bot, llm *llm.LLMClient, repo *Repository, usersRepo *user
 		llm:         llm,
 		repo:        repo,
 		users:       usersRepo,
+		msgs:        msgsRepo,
 		adminIDs:    amap,
 		gateEnabled: gateEnabled,
 		captchaTO:   captchaTimeout,
@@ -68,15 +71,12 @@ func (f *Flow) IsAdmin(userID int64) bool {
 	return ok
 }
 
-// kickUser: ban + сразу unban-only-if-banned → пользователь кикнут, но может вернуться.
 func (f *Flow) kickUser(ctx context.Context, chatID, userID int64) error {
-	if _, err := f.api.BanChatMember(ctx, &bot.BanChatMemberParams{
-		ChatID: chatID, UserID: userID,
-	}); err != nil {
-		return err
-	}
-	_, _ = f.api.UnbanChatMember(ctx, &bot.UnbanChatMemberParams{
-		ChatID: chatID, UserID: userID, OnlyIfBanned: true,
-	})
-	return nil
+	return kickUserReversible(ctx, f.api, chatID, userID)
+}
+
+// KickReversible — обратимый кик (бан с UntilDate + unban only-if-banned).
+// Используется командой /kick; повторяет путь модерации.
+func (f *Flow) KickReversible(ctx context.Context, chatID, userID int64) error {
+	return kickUserReversible(ctx, f.api, chatID, userID)
 }

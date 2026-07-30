@@ -18,3 +18,7 @@ logs/
 
 # OS
 .DS_Store
+
+# Claude Code (агенты/скиллы/пайплайны/хуки/память — не нужны в репо)
+.claude/
+CLAUDE.md

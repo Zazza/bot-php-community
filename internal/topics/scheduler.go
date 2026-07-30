@@ -88,12 +88,14 @@ func (s *Scheduler) checkQuietAndPost(ctx context.Context) {
 }
 
 // PostNow — ручная команда /topic now: генерирует свежий топик и постит сразу.
-func (s *Scheduler) PostNow(ctx context.Context, chatID int64) (string, error) {
+// dataChatID — чат-источник данных (для будущей chat-aware генерации); postChatID —
+// куда постить. В группе они совпадают; в ЛС (админ) postChatID = ЛС, dataChatID = группа.
+func (s *Scheduler) PostNow(ctx context.Context, dataChatID, postChatID int64) (string, error) {
 	topic, err := s.Generate(ctx)
 	if err != nil {
 		return "", err
 	}
-	if err := s.post(ctx, chatID, topic); err != nil {
+	if err := s.post(ctx, postChatID, topic); err != nil {
 		return "", err
 	}
 	return topic, nil

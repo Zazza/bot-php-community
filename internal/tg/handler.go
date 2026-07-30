@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"phpbot/internal/chat"
+	"phpbot/internal/faq"
 	"phpbot/internal/messages"
 	"phpbot/internal/moderation"
 	"phpbot/internal/topics"
@@ -19,6 +21,16 @@ import (
 
 // replyTimeout — сколько ждём LLM/дайджеста в фоне.
 const replyTimeout = 90 * time.Second
+
+// spamClassifyTimeout — budget на LLM-классификацию спама (отдельный от сохранения).
+const spamClassifyTimeout = 25 * time.Second
+
+// spamSaveTimeout — бюджет на сохранение/ответ после классификации (независим, чтобы
+// сообщение не терялось, если LLM съела почти всё время классификации).
+const spamSaveTimeout = 15 * time.Second
+
+// expertMaxDist — косинусный радиус «по теме» для /expert (~0.65 сходства).
+const expertMaxDist = 0.35
 
 // Handlers — центральная диспетчеризация update. Содержит ссылки на все домены.
 type Handlers struct {
@@ -29,12 +41,16 @@ type Handlers struct {
 	primaryChatID int64  // первый групповой чат — источник контекста для ответов в ЛС
 
 	moderation *moderation.Flow
+	spam       *moderation.SpamFilter
+	vote       *moderation.VoteToKick
 	users      *users.Repository
 	msgs       *messages.Repository
 	vec        *messages.VectorRepo
 	answerer   *chat.Answerer
 	topics     *topics.Scheduler
 	digester   *topics.Digester
+	faq        *faq.Repo
+	faqBuilder *faq.Builder
 }
 
 // HandlersDeps — зависимости для сборки Handlers.
@@ -43,12 +59,16 @@ type HandlersDeps struct {
 	ChatIDs    []int64
 	BotUserID  int64
 	Moderation *moderation.Flow
+	Spam       *moderation.SpamFilter
+	Vote       *moderation.VoteToKick
 	Users      *users.Repository
 	Msgs       *messages.Repository
 	Vec        *messages.VectorRepo
 	Answerer   *chat.Answerer
 	Topics     *topics.Scheduler
 	Digester   *topics.Digester
+	FAQ        *faq.Repo
+	FAQBuilder *faq.Builder
 }
 
 // NewHandlers собирает Handlers.
@@ -57,12 +77,16 @@ func NewHandlers(d HandlersDeps) *Handlers {
 		api:        d.API,
 		botUserID:  d.BotUserID,
 		moderation: d.Moderation,
+		spam:       d.Spam,
+		vote:       d.Vote,
 		users:      d.Users,
 		msgs:       d.Msgs,
 		vec:        d.Vec,
 		answerer:   d.Answerer,
 		topics:     d.Topics,
 		digester:   d.Digester,
+		faq:        d.FAQ,
+		faqBuilder: d.FAQBuilder,
 		chatIDs:    make(map[int64]struct{}, len(d.ChatIDs)),
 	}
 	for _, id := range d.ChatIDs {
@@ -101,8 +125,25 @@ func (h *Handlers) OnMessage(ctx context.Context, b *bot.Bot, upd *models.Update
 		return
 	}
 
-	// ЛС: отвечаем только админам, контекст берём из группового чата.
+	// ЛС: админ-команды выполняем против данных группового чата (primaryChatID),
+	// ответ шлём в ЛС. Свободный вопрос (ask) — через pmAnswer. Не-админам — отказ.
 	if msg.Chat.Type == "private" {
+		if msg.From == nil || !h.moderation.IsAdmin(msg.From.ID) {
+			_ = SendMessage(ctx, h.api, msg.Chat.ID, "В личке я отвечаю только администраторам чата.")
+			return
+		}
+		if h.primaryChatID == 0 {
+			_ = SendMessage(ctx, h.api, msg.Chat.ID, "Групповой чат не настроен.")
+			return
+		}
+		pt := msg.Text
+		if pt == "" {
+			pt = msg.Caption
+		}
+		if cmd, args := extractCommand(pt); cmd != "" {
+			h.dispatchCommand(ctx, msg.Chat.ID, h.primaryChatID, msg, cmd, args)
+			return
+		}
 		h.pmAnswer(ctx, msg)
 		return
 	}
@@ -119,17 +160,49 @@ func (h *Handlers) OnMessage(ctx context.Context, b *bot.Bot, upd *models.Update
 
 	// 2. Команды.
 	if cmd, args := extractCommand(text); cmd != "" {
-		h.dispatchCommand(ctx, chatID, msg, cmd, args)
+		h.dispatchCommand(ctx, chatID, chatID, msg, cmd, args)
 		return
 	}
 
 	// 3. Сохраняем любое текстовое сообщение в историю + async embedding.
 	if text != "" && msg.From != nil {
+		// 3a. Анти-спам: синхронная эвристика → при подозрении LLM-классификация в горутине.
+		// Не фильтруем бота, админов и не блокируем update-цикл.
+		if h.spam != nil && msg.From.ID != h.botUserID && !h.moderation.IsAdmin(msg.From.ID) {
+			in := moderation.SpamInput{
+				ChatID: chatID, UserID: msg.From.ID, Username: msg.From.Username,
+				MessageID: int64(msg.ID), Text: text,
+			}
+			if hit, reason := h.spam.Heuristic(in); hit {
+				go func(in moderation.SpamInput, reason string) {
+					defer func() {
+						if r := recover(); r != nil {
+							slog.Error("spam worker panic", "err", r, "stack", string(debug.Stack()))
+						}
+					}()
+					classCtx, classCancel := context.WithTimeout(context.Background(), spamClassifyTimeout)
+					defer classCancel()
+					if h.spam.ClassifyAndEnforce(classCtx, in, reason) {
+						return
+					}
+					// Свежий бюджет на сохранение/ответ — независимо от времени LLM.
+					saveCtx, saveCancel := context.WithTimeout(context.Background(), spamSaveTimeout)
+					defer saveCancel()
+					h.saveMessage(saveCtx, msg, in.Text)
+					if h.isAddressedToBot(msg, in.Text) {
+						h.answerChat(saveCtx, chatID, chatID, msg, stripBotMention(in.Text, h.botUserID))
+					}
+				}(in, reason)
+				return
+			}
+		}
+
+		// 3b. Сохраняем в историю + async embedding.
 		h.saveMessage(ctx, msg, text)
 
-		// 3a. PHP-триггеры: @упоминание бота или reply на сообщение бота.
+		// 3c. PHP-триггеры: @упоминание бота или reply на сообщение бота.
 		if h.isAddressedToBot(msg, text) {
-			h.answerChat(ctx, chatID, msg, stripBotMention(text, h.botUserID))
+			h.answerChat(ctx, chatID, chatID, msg, stripBotMention(text, h.botUserID))
 		}
 	}
 }
@@ -149,30 +222,49 @@ func (h *Handlers) OnCallbackQuery(ctx context.Context, b *bot.Bot, upd *models.
 		}
 		return
 	}
+	if strings.HasPrefix(cb.Data, "vote:") && h.vote != nil {
+		alert := h.vote.HandleVoteCallback(ctx, cb)
+		if alert == "" {
+			alert = "—"
+		}
+		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+			CallbackQueryID: cb.ID, Text: alert,
+		})
+		return
+	}
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
 		CallbackQueryID: cb.ID, Text: "—",
 	})
 }
 
 // dispatchCommand маршрутизирует slash-команды.
-func (h *Handlers) dispatchCommand(ctx context.Context, chatID int64, msg *models.Message, cmd, args string) {
+// replyChatID — куда шлём ответ; dataChatID — из чата тянем данные (в ЛС = primaryChatID).
+func (h *Handlers) dispatchCommand(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, cmd, args string) {
 	switch cmd {
 	case "ask":
-		h.answerChat(ctx, chatID, msg, args)
+		h.answerChat(ctx, replyChatID, dataChatID, msg, args)
 	case "search":
-		h.cmdSearch(ctx, chatID, args)
+		h.cmdSearch(ctx, replyChatID, dataChatID, args)
+	case "expert":
+		h.cmdExpert(ctx, replyChatID, dataChatID, args)
 	case "help", "start":
-		h.cmdHelp(ctx, chatID)
+		h.cmdHelp(ctx, replyChatID)
 	case "stats":
-		h.cmdStats(ctx, chatID)
+		h.cmdStats(ctx, replyChatID, dataChatID, args)
 	case "topic":
-		h.cmdTopic(ctx, chatID, msg, args)
+		h.cmdTopic(ctx, replyChatID, dataChatID, msg, args)
 	case "digest":
-		h.cmdDigest(ctx, chatID, msg, args)
+		h.cmdDigest(ctx, replyChatID, dataChatID, msg, args)
 	case "check":
-		h.cmdCheck(ctx, chatID, msg, args)
+		h.cmdCheck(ctx, replyChatID, dataChatID, msg, args)
+	case "about":
+		h.cmdAbout(ctx, replyChatID, dataChatID, msg, args)
+	case "faq":
+		h.cmdFaq(ctx, replyChatID, dataChatID, msg, args)
 	case "kick":
-		h.cmdKick(ctx, chatID, msg, args)
+		h.cmdKick(ctx, replyChatID, dataChatID, msg, args)
+	case "report":
+		h.cmdReport(ctx, replyChatID, dataChatID, msg, args)
 	default:
 		slog.Debug("unknown command", "cmd", cmd)
 	}
@@ -180,123 +272,357 @@ func (h *Handlers) dispatchCommand(ctx context.Context, chatID int64, msg *model
 
 // --- команды ---
 
-func (h *Handlers) cmdHelp(ctx context.Context, chatID int64) {
+func (h *Handlers) cmdHelp(ctx context.Context, replyChatID int64) {
 	text := `*Команды бота*
 
 /ask <вопрос> — ответ на PHP/IT-вопрос
 /search <запрос> — поиск по истории чата
+/expert <тема> — к кому обратиться по теме
 /stats — статистика чата
+/faq — список частых вопросов (или /faq <id>)
 /help — этот текст
 
 *Только для админов:*
 /topic now — сгенерировать и запостить тему
-/digest week — дайджест за неделю
+/digest [период] — дайджест (week, month, 2025-06)
 /check @user — ручная judge-проверка последних сообщений
+/about @user [период] — краткий портрет участника по его сообщениям
+/faq edit <id> <ответ> — правка ответа FAQ
+/faq build — пересобрать FAQ из истории
 /kick @user — кик пользователя
 
+*Для всех:*
+/report (reply на сообщение или @user) — голосование за изгнание
+
 Бот также отвечает на @упоминание и reply на своё сообщение.`
-	_ = SendMessage(ctx, h.api, chatID, text)
+	_ = SendMessage(ctx, h.api, replyChatID, text)
 }
 
-func (h *Handlers) cmdStats(ctx context.Context, chatID int64) {
-	s, err := h.msgs.Stats(ctx, chatID)
+func (h *Handlers) cmdStats(ctx context.Context, replyChatID, dataChatID int64, args string) {
+	p, err := parsePeriod(args)
 	if err != nil {
-		_ = SendMessage(ctx, h.api, chatID, "Не удалось собрать статистику.")
+		_ = SendMessage(ctx, h.api, replyChatID, "Не понял период. Примеры: /stats, /stats week, /stats 2025, /stats 2025-06")
+		return
+	}
+	s, err := h.msgs.Stats(ctx, dataChatID, p.since, p.until)
+	if err != nil {
+		_ = SendMessage(ctx, h.api, replyChatID, "Не удалось собрать статистику.")
 		return
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "📊 *Статистика чата*\n\nВсего сообщений: %d\nАктивных участников: %d\nЗа 24ч: %d\n\n*Топ за неделю:*",
-		s.TotalMessages, s.ActiveUsers, s.LastDay)
-	for i, p := range s.TopPosters {
-		fmt.Fprintf(&b, "\n%d. %s — %d", i+1, p.Username, p.Count)
+	fmt.Fprintf(&b, "📊 *Статистика чата*\n\nПериод: %s\nСообщений: %d\nАктивных: %d",
+		p.label, s.TotalMessages, s.ActiveUsers)
+	if p.until == nil {
+		fmt.Fprintf(&b, "\nЗа 24ч: %d", s.LastDay)
 	}
-	_ = SendMessage(ctx, h.api, chatID, b.String())
+	b.WriteString("\n\n*Топ за период:*")
+	for i, pp := range s.TopPosters {
+		fmt.Fprintf(&b, "\n%d. %s — %d", i+1, pp.Username, pp.Count)
+	}
+	_ = SendMessage(ctx, h.api, replyChatID, b.String())
 }
 
-func (h *Handlers) cmdSearch(ctx context.Context, chatID int64, query string) {
+func (h *Handlers) cmdSearch(ctx context.Context, replyChatID, dataChatID int64, args string) {
+	query, username, p := parseSearchArgs(args)
 	if strings.TrimSpace(query) == "" {
-		_ = SendMessage(ctx, h.api, chatID, "Использование: /search <запрос>")
+		_ = SendMessage(ctx, h.api, replyChatID, "Использование: /search <запрос> [@user] [период]\nПримеры: /search pgvector, /search pgvector @ivan, /search pgvector week, /search enum @ivan 2025-06")
 		return
 	}
 	qvec, err := h.vec.EmbedText(ctx, query)
 	if err != nil {
-		_ = SendMessage(ctx, h.api, chatID, "Ошибка поиска: не удалось векторизовать запрос.")
+		_ = SendMessage(ctx, h.api, replyChatID, "Ошибка поиска: не удалось векторизовать запрос.")
 		return
 	}
-	rows, err := h.vec.SearchTopK(ctx, chatID, qvec, 10)
+	rows, err := h.vec.SearchFiltered(ctx, dataChatID, qvec, 10, username, p.since, p.until)
 	if err != nil {
-		_ = SendMessage(ctx, h.api, chatID, "Ошибка поиска по истории.")
+		_ = SendMessage(ctx, h.api, replyChatID, "Ошибка поиска по истории.")
 		return
 	}
-	_ = SendMessage(ctx, h.api, chatID, "🔍 По запросу «"+query+"»:\n\n"+messages.FormatSearchResult(rows))
+	var b strings.Builder
+	b.WriteString("🔍 По запросу «" + query + "»")
+	if username != "" {
+		b.WriteString(", автор @" + username)
+	}
+	if p.since != nil || p.until != nil {
+		b.WriteString(", " + p.label)
+	}
+	b.WriteString("\n\n")
+	b.WriteString(messages.FormatSearchResult(rows))
+	_ = SendMessage(ctx, h.api, replyChatID, b.String())
 }
 
-func (h *Handlers) cmdTopic(ctx context.Context, chatID int64, msg *models.Message, args string) {
+func (h *Handlers) cmdExpert(ctx context.Context, replyChatID, dataChatID int64, args string) {
+	topic := strings.TrimSpace(args)
+	if topic == "" {
+		_ = SendMessage(ctx, h.api, replyChatID, "Использование: /expert <тема>\nПример: /expert pgvector индексы")
+		return
+	}
+	qvec, err := h.vec.EmbedText(ctx, topic)
+	if err != nil {
+		slog.Error("expert embed", "err", err, "topic", topic)
+		_ = SendMessage(ctx, h.api, replyChatID, "Не удалось обработать тему.")
+		return
+	}
+	exps, err := h.vec.Experts(ctx, dataChatID, qvec, expertMaxDist, 5)
+	if err != nil {
+		slog.Error("experts", "err", err, "chat", dataChatID)
+		_ = SendMessage(ctx, h.api, replyChatID, "Не удалось найти экспертов.")
+		return
+	}
+	if len(exps) == 0 {
+		_ = SendMessage(ctx, h.api, replyChatID, "🎓 По теме «"+topic+"» никого конкретного в истории не нашёл.")
+		return
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "🎓 По теме «%s» лучше спросить:\n", topic)
+	for i, e := range exps {
+		fmt.Fprintf(&b, "%d. @%s — %d сообщений\n", i+1, e.Username, e.Count)
+	}
+	_ = SendMessage(ctx, h.api, replyChatID, b.String())
+}
+
+func (h *Handlers) cmdTopic(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, args string) {
 	if !h.moderation.IsAdmin(msg.From.ID) {
-		_ = SendMessage(ctx, h.api, chatID, "Команда только для админов.")
+		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
 		return
 	}
 	if strings.TrimSpace(args) != "now" {
-		_ = SendMessage(ctx, h.api, chatID, "Использование: /topic now")
+		_ = SendMessage(ctx, h.api, replyChatID, "Использование: /topic now")
 		return
 	}
-	// PostNow сам постит тему через Scheduler.post() — повторно не отправляем.
-	if _, err := h.topics.PostNow(ctx, chatID); err != nil {
-		_ = SendMessage(ctx, h.api, chatID, "Не удалось сгенерировать тему: "+err.Error())
+	// PostNow сам постит тему через Scheduler.post() в postChatID — повторно не отправляем.
+	if _, err := h.topics.PostNow(ctx, dataChatID, replyChatID); err != nil {
+		_ = SendMessage(ctx, h.api, replyChatID, "Не удалось сгенерировать тему: "+err.Error())
 	}
 }
 
-func (h *Handlers) cmdDigest(ctx context.Context, chatID int64, msg *models.Message, args string) {
+func (h *Handlers) cmdDigest(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, args string) {
 	if !h.moderation.IsAdmin(msg.From.ID) {
-		_ = SendMessage(ctx, h.api, chatID, "Команда только для админов.")
+		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
 		return
 	}
-	if strings.TrimSpace(args) != "week" {
-		_ = SendMessage(ctx, h.api, chatID, "Использование: /digest week")
+	argStr := strings.TrimSpace(args)
+	if argStr == "" {
+		argStr = "week"
+	}
+	p, err := parsePeriod(argStr)
+	if err != nil {
+		_ = SendMessage(ctx, h.api, replyChatID, "Не понял период. Примеры: /digest, /digest week, /digest month, /digest 2025-06")
 		return
 	}
-	_ = SendMessage(ctx, h.api, chatID, "⏳ Собираю дайджест за неделю...")
-	// Асинхронно, чтобы не блокировать update-цикл.
-	go func() {
+	now := time.Now()
+	end := now
+	if p.until != nil {
+		end = *p.until
+	}
+	start := now.Add(-7 * 24 * time.Hour)
+	if p.since != nil {
+		start = *p.since
+	}
+	_ = SendMessage(ctx, h.api, replyChatID, "⏳ Собираю дайджест "+p.label+"...")
+	go func(replyChatID, dataChatID int64, start, end time.Time, label string) {
 		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
 		defer cancel()
-		end := time.Now()
-		start := end.Add(-7 * 24 * time.Hour)
-		if err := h.digester.PostDigest(ctxBg, chatID, start, end); err != nil {
+		if err := h.digester.PostDigest(ctxBg, dataChatID, replyChatID, start, end); err != nil {
 			if errors.Is(err, topics.ErrTooFewMessages) {
-				_ = SendMessage(ctxBg, h.api, chatID, "Недостаточно сообщений за неделю для дайджеста (нужно минимум 3).")
+				_ = SendMessage(ctxBg, h.api, replyChatID, "Недостаточно сообщений за период «"+label+"» (нужно минимум 3).")
 			} else {
-				_ = SendMessage(ctxBg, h.api, chatID, "Ошибка дайджеста: "+err.Error())
+				_ = SendMessage(ctxBg, h.api, replyChatID, "Ошибка дайджеста: "+err.Error())
 			}
 		}
-	}()
+	}(replyChatID, dataChatID, start, end, p.label)
 }
 
-func (h *Handlers) cmdCheck(ctx context.Context, chatID int64, msg *models.Message, args string) {
+func (h *Handlers) cmdCheck(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, args string) {
 	if !h.moderation.IsAdmin(msg.From.ID) {
-		_ = SendMessage(ctx, h.api, chatID, "Команда только для админов.")
+		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
 		return
 	}
 	target := strings.TrimSpace(strings.TrimPrefix(args, "@"))
 	if target == "" {
-		_ = SendMessage(ctx, h.api, chatID, "Использование: /check @username")
+		_ = SendMessage(ctx, h.api, replyChatID, "Использование: /check @username")
 		return
 	}
 	// Ищем последние сообщения по username (точное совпадение без @).
 	userID, lastText := h.lookupLastByUsername(ctx, target)
 	if userID == 0 || lastText == "" {
-		_ = SendMessage(ctx, h.api, chatID, "Не нашёл сообщений от @"+target)
+		_ = SendMessage(ctx, h.api, replyChatID, "Не нашёл сообщений от @"+target)
 		return
 	}
-	v := h.moderation.ManualCheck(ctx, chatID, userID, target, lastText)
-	_ = SendMessage(ctx, h.api, chatID,
+	v := h.moderation.ManualCheck(ctx, dataChatID, userID, target, lastText)
+	_ = SendMessage(ctx, h.api, replyChatID,
 		fmt.Sprintf("%s @%s — вердикт: %s\nПричина: %s",
 			moderation.VerdictEmoji(v.Verdict), target, v.Verdict, v.Reason))
 }
 
-func (h *Handlers) cmdKick(ctx context.Context, chatID int64, msg *models.Message, args string) {
+func (h *Handlers) cmdAbout(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, args string) {
 	if !h.moderation.IsAdmin(msg.From.ID) {
-		_ = SendMessage(ctx, h.api, chatID, "Команда только для админов.")
+		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
+		return
+	}
+	// Первое @-поле — username, остальное — строка периода.
+	fields := strings.Fields(args)
+	var username string
+	var rest []string
+	for _, tok := range fields {
+		if strings.HasPrefix(tok, "@") && username == "" {
+			username = strings.TrimPrefix(tok, "@")
+			continue
+		}
+		rest = append(rest, tok)
+	}
+	if username == "" {
+		_ = SendMessage(ctx, h.api, replyChatID, "Использование: /about @username [период]\nПримеры: /about @ivan, /about @ivan 2025-06, /about @ivan week")
+		return
+	}
+	p, err := parsePeriod(strings.Join(rest, " "))
+	if err != nil {
+		_ = SendMessage(ctx, h.api, replyChatID, "Не понял период. Примеры: (без), week, month, 2025, 2025-06")
+		return
+	}
+	_ = SendMessage(ctx, h.api, replyChatID, "⏳ Собираю профиль @"+username+" "+p.label+"...")
+	// Асинхронно, чтобы не блокировать update-цикл. Контекст — из dataChatID (группы),
+	// ответ — в replyChatID (допускает ЛС админа).
+	go func(replyChatID, dataChatID int64, username string, since, until *time.Time, label string) {
+		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
+		defer cancel()
+		resp, err := h.answerer.About(ctxBg, dataChatID, username, since, until, label)
+		if err != nil {
+			slog.Error("about", "err", err, "user", username)
+			_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось собрать профиль.")
+			return
+		}
+		_ = SendMessage(ctxBg, h.api, replyChatID, "🧑 @"+username+" — "+label+"\n\n"+resp)
+	}(replyChatID, dataChatID, username, p.since, p.until, p.label)
+}
+
+const faqListMaxRunes = 4000 // TG лимит 4096, оставляем запас на заголовок
+
+func (h *Handlers) cmdFaq(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, args string) {
+	if h.faq == nil {
+		_ = SendMessage(ctx, h.api, replyChatID, "FAQ не настроен.")
+		return
+	}
+	fields := strings.Fields(args)
+	sub := ""
+	if len(fields) > 0 {
+		sub = fields[0]
+	}
+
+	switch sub {
+	case "", "list":
+		h.faqList(ctx, replyChatID, dataChatID)
+	case "edit":
+		h.faqEdit(ctx, replyChatID, msg, fields, args)
+	case "build":
+		h.faqBuild(ctx, replyChatID, dataChatID, msg)
+	default:
+		if id, ok := parseInt64(sub); ok {
+			h.faqShow(ctx, replyChatID, id)
+		} else {
+			_ = SendMessage(ctx, h.api, replyChatID, faqUsage)
+		}
+	}
+}
+
+func (h *Handlers) faqList(ctx context.Context, replyChatID, dataChatID int64) {
+	items, err := h.faq.List(ctx, dataChatID)
+	if err != nil {
+		slog.Error("faq list", "err", err, "chat", dataChatID)
+		_ = SendMessage(ctx, h.api, replyChatID, "Не удалось загрузить FAQ.")
+		return
+	}
+	if len(items) == 0 {
+		_ = SendMessage(ctx, h.api, replyChatID, "FAQ пока пуст (/faq build соберёт).")
+		return
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "📚 FAQ (%d):\n", len(items))
+	for _, it := range items {
+		q := it.Question
+		if r := []rune(q); len(r) > 60 {
+			q = string(r[:60]) + "…"
+		}
+		line := fmt.Sprintf("\n%d. %s", it.ID, q)
+		if b.Len()+len(line) > faqListMaxRunes {
+			b.WriteString("\n…(обрезано)")
+			break
+		}
+		b.WriteString(line)
+	}
+	_ = SendMessage(ctx, h.api, replyChatID, b.String())
+}
+
+func (h *Handlers) faqShow(ctx context.Context, replyChatID int64, id int64) {
+	it, err := h.faq.Get(ctx, id)
+	if err != nil {
+		slog.Error("faq get", "err", err, "id", id)
+		_ = SendMessage(ctx, h.api, replyChatID, "Не удалось загрузить запись.")
+		return
+	}
+	if it == nil {
+		_ = SendMessage(ctx, h.api, replyChatID, "Запись не найдена.")
+		return
+	}
+	_ = SendMessage(ctx, h.api, replyChatID, fmt.Sprintf("❓ %s\n\n💡 %s", it.Question, it.Answer))
+}
+
+func (h *Handlers) faqEdit(ctx context.Context, replyChatID int64, msg *models.Message, fields []string, args string) {
+	if msg.From == nil || !h.moderation.IsAdmin(msg.From.ID) {
+		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
+		return
+	}
+	if len(fields) < 2 {
+		_ = SendMessage(ctx, h.api, replyChatID, "Использование: /faq edit <id> <ответ>")
+		return
+	}
+	id, ok := parseInt64(fields[1])
+	if !ok {
+		_ = SendMessage(ctx, h.api, replyChatID, "id должен быть числом.")
+		return
+	}
+	answer := strings.TrimSpace(strings.TrimPrefix(args, "edit"))
+	answer = strings.TrimSpace(strings.TrimPrefix(answer, fields[1]))
+	if answer == "" {
+		_ = SendMessage(ctx, h.api, replyChatID, "Текст ответа пуст.")
+		return
+	}
+	if err := h.faq.UpdateAnswer(ctx, id, answer); err != nil {
+		slog.Error("faq update", "err", err, "id", id)
+		_ = SendMessage(ctx, h.api, replyChatID, "Не удалось обновить ответ.")
+		return
+	}
+	_ = SendMessage(ctx, h.api, replyChatID, fmt.Sprintf("✅ Ответ #%d обновлён.", id))
+}
+
+func (h *Handlers) faqBuild(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message) {
+	if msg.From == nil || !h.moderation.IsAdmin(msg.From.ID) {
+		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
+		return
+	}
+	if h.faqBuilder == nil {
+		_ = SendMessage(ctx, h.api, replyChatID, "FAQ-билдер не настроен.")
+		return
+	}
+	_ = SendMessage(ctx, h.api, replyChatID, "⏳ Собираю FAQ из истории...")
+	go func(replyChatID, dataChatID int64) {
+		ctxBg, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		n, err := h.faqBuilder.Build(ctxBg, dataChatID)
+		if err != nil {
+			slog.Error("faq build", "err", err, "chat", dataChatID)
+			_ = SendMessage(ctxBg, h.api, replyChatID, "Ошибка сборки FAQ: "+err.Error())
+			return
+		}
+		_ = SendMessage(ctxBg, h.api, replyChatID, fmt.Sprintf("FAQ собран: %d записей.", n))
+	}(replyChatID, dataChatID)
+}
+
+const faqUsage = "Использование:\n/faq — список\n/faq <id> — показать\n/faq edit <id> <ответ> — правка (админ)\n/faq build — пересобрать (админ)"
+
+func (h *Handlers) cmdKick(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, args string) {
+	if !h.moderation.IsAdmin(msg.From.ID) {
+		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
 		return
 	}
 	target := strings.TrimSpace(strings.TrimPrefix(args, "@"))
@@ -308,39 +634,115 @@ func (h *Handlers) cmdKick(ctx context.Context, chatID int64, msg *models.Messag
 		userID, _ = h.lookupLastByUsername(ctx, target)
 	}
 	if userID == 0 {
-		_ = SendMessage(ctx, h.api, chatID, "Не нашёл пользователя. /kick @username или /kick <user_id>")
+		_ = SendMessage(ctx, h.api, replyChatID, "Не нашёл пользователя. /kick @username или /kick <user_id>")
 		return
 	}
-	// Кикаем через те же primitives, что и moderation-flow (kick → unban-only-if-banned).
-	if _, err := h.api.BanChatMember(ctx, &bot.BanChatMemberParams{ChatID: chatID, UserID: userID}); err != nil {
-		_ = SendMessage(ctx, h.api, chatID, "Ошибка кика: "+err.Error())
+	// Обратимый кик в групповом чате (dataChatID), отчёт — в replyChatID.
+	if err := h.moderation.KickReversible(ctx, dataChatID, userID); err != nil {
+		slog.Error("kick", "err", err, "user", userID)
+		_ = SendMessage(ctx, h.api, replyChatID, "Не удалось кикнуть пользователя, попробуй позже.")
 		return
 	}
-	_, _ = h.api.UnbanChatMember(ctx, &bot.UnbanChatMemberParams{
-		ChatID: chatID, UserID: userID, OnlyIfBanned: true,
-	})
-	_ = SendMessage(ctx, h.api, chatID, fmt.Sprintf("Пользователь %s кикнут.", target))
+	_ = SendMessage(ctx, h.api, replyChatID, fmt.Sprintf("Пользователь %s кикнут.", target))
+}
+
+// cmdReport запускает голосование за изгнание участника.
+// Таргет: reply на сообщение нарушителя ИЛИ @username/числовой id в args.
+// В ЛС голосование не запускается — оно привязано к чату (кнопки/кворум).
+func (h *Handlers) cmdReport(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, args string) {
+	if h.vote == nil {
+		_ = SendMessage(ctx, h.api, replyChatID, "Голосование выключено.")
+		return
+	}
+	if replyChatID != dataChatID {
+		_ = SendMessage(ctx, h.api, replyChatID, "Голосование запускается только в чате — ответь /report в PHP_VRN")
+		return
+	}
+	if msg.From == nil {
+		return
+	}
+	fromID := msg.From.ID
+
+	var targetID int64
+	var targetUsername string
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
+		targetID = msg.ReplyToMessage.From.ID
+		targetUsername = msg.ReplyToMessage.From.Username
+	} else {
+		fields := strings.Fields(args)
+		if len(fields) > 0 {
+			t := strings.TrimPrefix(fields[0], "@")
+			if n, ok := parseInt64(t); ok {
+				targetID = n
+			} else {
+				targetID, _ = h.lookupLastByUsername(ctx, t)
+				targetUsername = t
+			}
+		}
+	}
+	if targetID == 0 {
+		_ = SendMessage(ctx, h.api, replyChatID, "Сделай reply на сообщение нарушителя или укажи @username: /report @user")
+		return
+	}
+
+	reason := ""
+	if msg.ReplyToMessage != nil {
+		reason = strings.TrimSpace(args)
+	} else {
+		fs := strings.Fields(args)
+		if len(fs) > 1 {
+			reason = strings.TrimSpace(strings.Join(fs[1:], " "))
+		}
+	}
+	if reason == "" {
+		reason = "жалоба участников чата"
+	}
+
+	switch {
+	case targetID == fromID:
+		_ = SendMessage(ctx, h.api, replyChatID, "Нельзя репортить себя 🙂")
+		return
+	case targetID == h.botUserID:
+		_ = SendMessage(ctx, h.api, replyChatID, "Бота изгнать нельзя 🙂")
+		return
+	case h.moderation.IsAdmin(targetID):
+		_ = SendMessage(ctx, h.api, replyChatID, "Админов изгонять нельзя.")
+		return
+	}
+	if targetUsername == "" {
+		targetUsername = fmt.Sprintf("user_%d", targetID)
+	}
+
+	if err := h.vote.StartVote(ctx, dataChatID, targetID, targetUsername, reason, fromID); err != nil {
+		switch {
+		case errors.Is(err, moderation.ErrVoteAlreadyActive), errors.Is(err, moderation.ErrReportCooldown):
+			_ = SendMessage(ctx, h.api, replyChatID, err.Error())
+		default:
+			slog.Error("start vote", "err", err, "reporter", fromID)
+			_ = SendMessage(ctx, h.api, replyChatID, "Не удалось запустить голосование, попробуй позже.")
+		}
+	}
 }
 
 // --- вспомогательное ---
 
-// answerChat вызывает answerer и шлёт ответ.
-func (h *Handlers) answerChat(ctx context.Context, chatID int64, msg *models.Message, question string) {
+// answerChat вызывает answerer (контекст из dataChatID) и шлёт ответ в replyChatID.
+func (h *Handlers) answerChat(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, question string) {
 	question = strings.TrimSpace(question)
 	if question == "" {
-		_ = SendMessage(ctx, h.api, chatID, "Спроси что-нибудь конкретнее 🙂")
+		_ = SendMessage(ctx, h.api, replyChatID, "Спроси что-нибудь конкретнее 🙂")
 		return
 	}
 	go func() {
 		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
 		defer cancel()
-		resp, err := h.answerer.Answer(ctxBg, chatID, replyUsername(msg.From), question)
+		resp, err := h.answerer.Answer(ctxBg, dataChatID, replyUsername(msg.From), question)
 		if err != nil {
 			slog.Error("answer chat", "err", err)
-			_ = SendMessage(ctxBg, h.api, chatID, "Не удалось получить ответ, попробуй позже.")
+			_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось получить ответ, попробуй позже.")
 			return
 		}
-		_ = SendMessage(ctxBg, h.api, chatID, resp)
+		_ = SendMessage(ctxBg, h.api, replyChatID, resp)
 	}()
 }
 

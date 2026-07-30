@@ -11,6 +11,9 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"phpbot/internal/llm"
+	"phpbot/internal/messages"
+	"phpbot/internal/prompts"
 	"phpbot/internal/users"
 )
 
@@ -20,7 +23,7 @@ func (f *Flow) OnNewMember(ctx context.Context, chatID, userID int64, username s
 		_, _ = f.users.Upsert(ctx, &users.User{TGUserID: userID, Username: username, Status: "member"})
 		return
 	}
-	display := atUser(username)
+	display := atUser(username, "новичок")
 	if _, err := f.users.Upsert(ctx, &users.User{TGUserID: userID, Username: username, Status: "suspect"}); err != nil {
 		slog.Error("gate upsert suspect", "err", err)
 	}
@@ -82,8 +85,9 @@ func (f *Flow) HandleGateCallback(ctx context.Context, cb *models.CallbackQuery)
 		_ = f.repo.SetGateSolved(ctx, gateID, time.Now().Add(f.probation))
 		_ = f.users.SetStatus(ctx, g.TGUserID, "member")
 		newText := fmt.Sprintf("✅ %s — верно! Пиши, но без ссылок/медиа первые %d ч (анти-спам).",
-			atUser(g.Username), int(f.probation.Hours()))
+			atUser(g.Username, "новичок"), int(f.probation.Hours()))
 		f.editAndClear(ctx, g.ChatID, g.CaptchaMessageID, newText)
+		go f.postSmartWelcome(g.ChatID, g.Username)
 		return "✅ Верно!"
 	}
 
@@ -172,49 +176,19 @@ func (f *Flow) sweep(ctx context.Context) {
 // --- restrict / message helpers ---
 
 func (f *Flow) mute(ctx context.Context, chatID, userID int64) error {
-	_, err := f.api.RestrictChatMember(ctx, &bot.RestrictChatMemberParams{
-		ChatID:                        chatID,
-		UserID:                        userID,
-		Permissions:                   &models.ChatPermissions{},
-		UseIndependentChatPermissions: true,
-	})
-	return err
+	return muteUser(ctx, f.api, chatID, userID)
 }
 
-// restrictTextOnly — только текст, без медиа/превью/forwards (линк-провация).
 func (f *Flow) restrictTextOnly(ctx context.Context, chatID, userID int64) error {
-	_, err := f.api.RestrictChatMember(ctx, &bot.RestrictChatMemberParams{
-		ChatID:                        chatID,
-		UserID:                        userID,
-		Permissions:                   &models.ChatPermissions{CanSendMessages: true},
-		UseIndependentChatPermissions: true,
-	})
-	return err
+	return restrictUserTextOnly(ctx, f.api, chatID, userID)
 }
 
-// unmuteFull — снять все ограничения (полные права).
 func (f *Flow) unmuteFull(ctx context.Context, chatID, userID int64) error {
-	_, err := f.api.RestrictChatMember(ctx, &bot.RestrictChatMemberParams{
-		ChatID: chatID,
-		UserID: userID,
-		Permissions: &models.ChatPermissions{
-			CanSendMessages: true, CanSendAudios: true, CanSendDocuments: true,
-			CanSendPhotos: true, CanSendVideos: true, CanSendVideoNotes: true,
-			CanSendVoiceNotes: true, CanSendPolls: true, CanSendOtherMessages: true,
-			CanAddWebPagePreviews: true,
-		},
-		UseIndependentChatPermissions: true,
-	})
-	return err
+	return unmuteUserFull(ctx, f.api, chatID, userID)
 }
 
 func (f *Flow) deleteCaptchaMessage(ctx context.Context, chatID, messageID int64) {
-	if messageID == 0 {
-		return
-	}
-	if _, err := f.api.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: chatID, MessageID: int(messageID)}); err != nil {
-		slog.Warn("gate delete message", "err", err)
-	}
+	deleteChatMessage(ctx, f.api, chatID, messageID)
 }
 
 // editAndClear правит текст капчи и убирает кнопки.
@@ -233,17 +207,44 @@ func (f *Flow) editAndClear(ctx context.Context, chatID, messageID int64, text s
 	}
 }
 
-func (f *Flow) userGone(ctx context.Context, chatID, userID int64) bool {
-	m, err := f.api.GetChatMember(ctx, &bot.GetChatMemberParams{ChatID: chatID, UserID: userID})
-	if err != nil {
-		return false
+// postSmartWelcome асинхронно постит новичку «сейчас обсуждают: <3 темы>» по недавним
+// сообщениям чата. Запускается горутиной из solved-ветки, чтобы не тормозить callback.
+// Fail-safe: любая ошибка/пустой ответ → тихий пропуск (капча уже поприветствовала).
+func (f *Flow) postSmartWelcome(chatID int64, username string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	recent, err := f.msgs.Last(ctx, chatID, 40)
+	if err != nil || len(recent) == 0 {
+		slog.Warn("smart welcome: no recent messages", "err", err)
+		return
 	}
-	return m.Type == models.ChatMemberTypeLeft || m.Type == models.ChatMemberTypeBanned
+	system := prompts.Get(prompts.Welcome)
+	resp, _, _, err := f.llm.Chat(ctx, []llm.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: messages.FormatContext(recent)},
+	})
+	if err != nil {
+		slog.Warn("smart welcome llm", "err", err)
+		return
+	}
+	resp = strings.TrimSpace(resp)
+	if resp == "" {
+		return
+	}
+	name := atUser(username, "новичок")
+	text := "🚀 " + name + ", добро пожаловать в «PHP-сообщество Воронеж»!\n\nСейчас тут обсуждают:\n" + resp
+	if _, err := f.api.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: text}); err != nil {
+		slog.Warn("smart welcome post", "err", err)
+	}
 }
 
-func atUser(username string) string {
+func (f *Flow) userGone(ctx context.Context, chatID, userID int64) bool {
+	return isUserGone(ctx, f.api, chatID, userID)
+}
+
+func atUser(username, fallback string) string {
 	if username == "" {
-		return "новичок"
+		return fallback
 	}
 	return "@" + username
 }

@@ -16,6 +16,7 @@ import (
 	"phpbot/internal/chat"
 	"phpbot/internal/config"
 	"phpbot/internal/db"
+	"phpbot/internal/faq"
 	"phpbot/internal/llm"
 	"phpbot/internal/messages"
 	"phpbot/internal/moderation"
@@ -41,6 +42,10 @@ func main() {
 	// fail-fast: критичный промпт должен быть встроен.
 	if prompts.Get(prompts.Judge) == "" {
 		slog.Error("judge prompt missing in embed")
+		os.Exit(1)
+	}
+	if cfg.SpamEnabled && prompts.Get(prompts.Spam) == "" {
+		slog.Error("spam prompt missing in embed")
 		os.Exit(1)
 	}
 
@@ -70,7 +75,10 @@ func main() {
 		slog.Info("web search enabled", "url", cfg.SearXNGURL, "max", cfg.SearXNGMax)
 	}
 
-	answerer := chat.New(llmClient, msgRepo, vecRepo, webSearcher)
+	faqRepo := faq.NewRepo(dbx)
+	faqBuilder := faq.NewBuilder(dbx, llmClient, msgRepo, faqRepo, cfg.ChatIDs)
+
+	answerer := chat.New(llmClient, msgRepo, vecRepo, webSearcher, faqRepo)
 	moderRepo := moderation.NewRepository(dbx)
 
 	b, err := bot.New(cfg.TGToken, bot.WithDefaultHandler(func(_ context.Context, _ *bot.Bot, _ *models.Update) {}))
@@ -87,17 +95,37 @@ func main() {
 	slog.Info("bot identity", "id", me.ID, "username", me.Username)
 
 	poster := tg.NewPoster(b)
-	moderFlow := moderation.NewFlow(b, llmClient, moderRepo, userRepo,
+	moderFlow := moderation.NewFlow(b, llmClient, moderRepo, userRepo, msgRepo,
 		cfg.GateEnabled, cfg.CaptchaTimeout, cfg.CaptchaMaxAttempts, cfg.Probation, cfg.AdminIDs)
 	moderFlow.Start(ctx)
 	defer moderFlow.Stop()
+
+	spamFilter := moderation.NewSpamFilter(b, llmClient, moderRepo, cfg.AdminIDs, me.ID, moderation.SpamConfig{
+		FloodMsgs: cfg.SpamFloodMsgs, FloodWindow: cfg.SpamFloodWindow,
+		WarnMax: cfg.SpamWarnMax, WarnPeriod: cfg.SpamWarnPeriod, RestrictHours: cfg.SpamRestrictHours,
+	})
+	if cfg.SpamEnabled {
+		spamFilter.Start(ctx)
+		defer spamFilter.Stop()
+	}
+
+	voteKick := moderation.NewVoteToKick(b, moderRepo, cfg.AdminIDs, me.ID, moderation.VoteConfig{
+		Window: cfg.VoteWindow, Quorum: cfg.VoteQuorum,
+	})
+	if cfg.VoteEnabled {
+		voteKick.Start(ctx)
+		defer voteKick.Stop()
+	}
+
 	topicsSched := topics.New(dbx, llmClient, msgRepo, poster, cfg.ChatIDs, cfg.QuietThreshold)
 	digester := topics.NewDigester(dbx, llmClient, msgRepo, poster, cfg.ChatIDs)
 
 	handlers := tg.NewHandlers(tg.HandlersDeps{
 		API: b, ChatIDs: cfg.ChatIDs, BotUserID: me.ID,
-		Moderation: moderFlow, Users: userRepo, Msgs: msgRepo, Vec: vecRepo,
+		Moderation: moderFlow, Spam: spamFilter, Vote: voteKick,
+		Users: userRepo, Msgs: msgRepo, Vec: vecRepo,
 		Answerer: answerer, Topics: topicsSched, Digester: digester,
+		FAQ: faqRepo, FAQBuilder: faqBuilder,
 	})
 	handlers.SetBotUsername(me.Username)
 
@@ -110,8 +138,12 @@ func main() {
 	if err := digester.Start(ctx, "0 9 * * 1"); err != nil {
 		slog.Error("digest cron start", "err", err)
 	}
+	if err := faqBuilder.Start(ctx, "0 4 * * 1"); err != nil {
+		slog.Error("faq cron start", "err", err)
+	}
 	defer topicsSched.Stop()
 	defer digester.Stop()
+	defer faqBuilder.Stop()
 
 	// Graceful shutdown.
 	go func() {

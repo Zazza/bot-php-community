@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Deploy to prod (201.51.5.61, /srv/php-bot)
+      - name: Deploy to prod (DEPLOY_HOST secret, /srv/php-bot)
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}

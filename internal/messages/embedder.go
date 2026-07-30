@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/pgvector/pgvector-go"
@@ -14,11 +15,11 @@ import (
 
 // VectorRepo хранит и ищет эмбеддинги сообщений через pgvector.
 type VectorRepo struct {
-	db      *sqlx.DB
-	embed   *llm.Embedder
-	queue   chan int64 // message_id для отложенного embedding
-	stop    chan struct{}
-	wg      sync.WaitGroup
+	db    *sqlx.DB
+	embed *llm.Embedder
+	queue chan int64 // message_id для отложенного embedding
+	stop  chan struct{}
+	wg    sync.WaitGroup
 }
 
 // NewVectorRepo создаёт репозиторий. queueSize — буфер канала очереди.
@@ -118,10 +119,28 @@ type SearchMessage struct {
 	Distance float64 `db:"distance" json:"distance"`
 }
 
-// SearchTopK ищет top-K ближайших сообщений в чате по косинусу к вектору запроса.
+// SearchTopK ищет top-K ближайших сообщений в чате по косинусу к вектору запроса
+// без фильтров. Тонкая обёртка над search — поведение Answerer не меняется.
 func (v *VectorRepo) SearchTopK(ctx context.Context, chatID int64, queryVec []float32, k int) ([]SearchMessage, error) {
+	return v.search(ctx, chatID, queryVec, k, "", nil, nil)
+}
+
+// SearchFiltered ищет top-K по косинусу с опциональными фильтрами по автору
+// (username без @) и периоду [since, until). Пустой username и nil-границы
+// отключают соответствующие фильтры.
+func (v *VectorRepo) SearchFiltered(ctx context.Context, chatID int64, queryVec []float32, k int, username string, since, until *time.Time) ([]SearchMessage, error) {
+	return v.search(ctx, chatID, queryVec, k, username, since, until)
+}
+
+// search — общий движок поиска. username="" → nil-параметр (IS NULL истинно,
+// фильтр отключен). nil since/until → NULL (pgx шлёт NULL для nil *time.Time).
+func (v *VectorRepo) search(ctx context.Context, chatID int64, queryVec []float32, k int, username string, since, until *time.Time) ([]SearchMessage, error) {
 	if k <= 0 {
 		k = 8
+	}
+	var userParam interface{}
+	if username != "" {
+		userParam = username
 	}
 	var rows []SearchMessage
 	// <=> — косинусное расстояние (HNSW vector_cosine_ops). Меньше = релевантнее.
@@ -131,10 +150,41 @@ func (v *VectorRepo) SearchTopK(ctx context.Context, chatID int64, queryVec []fl
 		FROM embeddings e
 		JOIN messages m ON m.id = e.message_id
 		WHERE m.chat_id = $2
+		  AND ($3::text IS NULL OR m.username = $3)
+		  AND ($4::timestamptz IS NULL OR m.ts >= $4)
+		  AND ($5::timestamptz IS NULL OR m.ts < $5)
 		ORDER BY e.embedding <=> $1
-		LIMIT $3
-	`, pgvector.NewVector(queryVec), chatID, k); err != nil {
-		return nil, fmt.Errorf("search top-k: %w", err)
+		LIMIT $6
+	`, pgvector.NewVector(queryVec), chatID, userParam, since, until, k); err != nil {
+		return nil, fmt.Errorf("search: %w", err)
+	}
+	return rows, nil
+}
+
+// Expert — строка агрегации: кто чаще всего пишет по теме.
+type Expert struct {
+	UserID   int64  `db:"user_id" json:"user_id"`
+	Username string `db:"username" json:"username"`
+	Count    int    `db:"cnt" json:"count"`
+}
+
+// Experts считает, сколько сообщений каждого пользователя лежат в радиусе maxDist
+// (косинусное расстояние) к теме — кто чаще пишет по ней.
+func (v *VectorRepo) Experts(ctx context.Context, chatID int64, queryVec []float32, maxDist float64, limit int) ([]Expert, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	var rows []Expert
+	if err := v.db.SelectContext(ctx, &rows, `
+		SELECT m.user_id, COALESCE(NULLIF(m.username,''),'user') AS username, count(*) AS cnt
+		FROM embeddings e
+		JOIN messages m ON m.id = e.message_id
+		WHERE m.chat_id = $1 AND (e.embedding <=> $2) < $3
+		GROUP BY m.user_id, m.username
+		ORDER BY cnt DESC
+		LIMIT $4
+	`, chatID, pgvector.NewVector(queryVec), maxDist, limit); err != nil {
+		return nil, fmt.Errorf("experts: %w", err)
 	}
 	return rows, nil
 }

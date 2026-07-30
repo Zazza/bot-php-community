@@ -27,9 +27,13 @@ func Get(name string, args ...any) string {
 
 // Имена файлов промптов.
 const (
-	Judge  = "judge.txt"
-	Chat   = "chat.txt"
-	Topic  = "topic.txt"
-	Digest = "digest.txt"
-	Safety = "safety.txt"
+	Judge   = "judge.txt"
+	Chat    = "chat.txt"
+	Topic   = "topic.txt"
+	Digest  = "digest.txt"
+	Safety  = "safety.txt"
+	Spam    = "spam.txt"
+	About   = "about.txt"
+	Welcome = "welcome.txt"
+	FAQ     = "faq.txt"
 )

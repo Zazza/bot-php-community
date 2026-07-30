@@ -3,6 +3,8 @@ package messages
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,13 +14,13 @@ import (
 
 // Message — строка таблицы messages.
 type Message struct {
-	ID         int64     `db:"id"`
-	ChatID     int64     `db:"chat_id"`
-	UserID     int64     `db:"user_id"`
-	Username   string    `db:"username"`
-	Text       string    `db:"text"`
-	TS         time.Time `db:"ts"`
-	ReplyToID  *int64    `db:"reply_to_id"`
+	ID        int64     `db:"id"`
+	ChatID    int64     `db:"chat_id"`
+	UserID    int64     `db:"user_id"`
+	Username  string    `db:"username"`
+	Text      string    `db:"text"`
+	TS        time.Time `db:"ts"`
+	ReplyToID *int64    `db:"reply_to_id"`
 }
 
 // Repository читает/пишет сообщения и embeddings.
@@ -64,6 +66,26 @@ func (r *Repository) Last(ctx context.Context, chatID int64, limit int) ([]Messa
 	return rows, nil
 }
 
+// NextAfter возвращает первое сообщение чата с ts > after (хронологически следующее
+// за past.TS — вероятный ответ/реакция). Если таких строк нет — (nil, nil) без ошибки.
+func (r *Repository) NextAfter(ctx context.Context, chatID int64, after time.Time) (*Message, error) {
+	var m Message
+	err := r.db.GetContext(ctx, &m, `
+		SELECT id, chat_id, user_id, username, text, ts, reply_to_id
+		FROM messages
+		WHERE chat_id = $1 AND ts > $2
+		ORDER BY ts ASC
+		LIMIT 1
+	`, chatID, after)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("next after: %w", err)
+	}
+	return &m, nil
+}
+
 // CountSince возвращает число сообщений в чате за период [since, now].
 func (r *Repository) CountSince(ctx context.Context, chatID int64, since time.Time) (int, error) {
 	var n int
@@ -107,6 +129,27 @@ func (r *Repository) LastByUser(ctx context.Context, userID int64, limit int) ([
 	return rows, nil
 }
 
+// ByUsername возвращает последние сообщения пользователя в чате по @username за период.
+// Порядок DESC (свежие первыми). since/until == nil — без границы.
+func (r *Repository) ByUsername(ctx context.Context, chatID int64, username string, since, until *time.Time, limit int) ([]Message, error) {
+	if limit <= 0 {
+		limit = 150
+	}
+	var rows []Message
+	if err := r.db.SelectContext(ctx, &rows, `
+		SELECT id, chat_id, user_id, username, text, ts, reply_to_id
+		FROM messages
+		WHERE chat_id = $1 AND username = $2
+		  AND ($3::timestamptz IS NULL OR ts >= $3)
+		  AND ($4::timestamptz IS NULL OR ts < $4)
+		ORDER BY ts DESC
+		LIMIT $5
+	`, chatID, username, since, until, limit); err != nil {
+		return nil, fmt.Errorf("messages by username: %w", err)
+	}
+	return rows, nil
+}
+
 // LastByUsername находит id пользователя и текст его последнего сообщения по @username.
 // Возвращает (0, "", nil) если совпадений нет.
 func (r *Repository) LastByUsername(ctx context.Context, username string) (userID int64, text string, err error) {
@@ -138,27 +181,33 @@ type Poster struct {
 	Count    int    `db:"cnt" json:"count"`
 }
 
-// Stats считает сводку по чату за всё время + топ-5 за неделю.
-func (r *Repository) Stats(ctx context.Context, chatID int64) (*Stats, error) {
+// Stats считает сводку по чату за период. since/until == nil — без границы.
+// last_day всегда «за последние 24ч» (свежее активности), остальные агрегаты фильтруются периодом.
+func (r *Repository) Stats(ctx context.Context, chatID int64, since, until *time.Time) (*Stats, error) {
 	s := &Stats{}
 	if err := r.db.GetContext(ctx, s, `
 		SELECT
 			count(*) AS total_messages,
 			count(DISTINCT user_id) AS active_users,
 			count(*) FILTER (WHERE ts >= now() - interval '24 hours') AS last_day
-		FROM messages WHERE chat_id = $1
-	`, chatID); err != nil {
+		FROM messages
+		WHERE chat_id = $1
+		  AND ($2::timestamptz IS NULL OR ts >= $2)
+		  AND ($3::timestamptz IS NULL OR ts < $3)
+	`, chatID, since, until); err != nil {
 		return nil, fmt.Errorf("stats: %w", err)
 	}
 	var top []Poster
 	if err := r.db.SelectContext(ctx, &top, `
 		SELECT COALESCE(NULLIF(username,''),'user') AS username, count(*) AS cnt
 		FROM messages
-		WHERE chat_id = $1 AND ts >= now() - interval '7 days'
+		WHERE chat_id = $1
+		  AND ($2::timestamptz IS NULL OR ts >= $2)
+		  AND ($3::timestamptz IS NULL OR ts < $3)
 		GROUP BY username
 		ORDER BY cnt DESC
 		LIMIT 5
-	`, chatID); err != nil {
+	`, chatID, since, until); err != nil {
 		return nil, fmt.Errorf("stats top: %w", err)
 	}
 	s.TopPosters = top

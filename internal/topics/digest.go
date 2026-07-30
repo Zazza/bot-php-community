@@ -46,7 +46,7 @@ func (d *Digester) Start(ctx context.Context, spec string) error {
 		end := time.Now()
 		start := end.Add(-7 * 24 * time.Hour)
 		for _, chatID := range d.chatIDs {
-			if err := d.PostDigest(bg, chatID, start, end); err != nil {
+			if err := d.PostDigest(bg, chatID, chatID, start, end); err != nil {
 				if errors.Is(err, ErrTooFewMessages) {
 					slog.Debug("weekly digest skipped", "chat_id", chatID, "err", err)
 				} else {
@@ -72,13 +72,15 @@ func (d *Digester) Stop() {
 }
 
 // PostDigest суммаризирует сообщения за [start, end), постит в чат, пишет topic_digests.
-func (d *Digester) PostDigest(ctx context.Context, chatID int64, start, end time.Time) error {
-	msgs, err := d.msgs.Since(ctx, chatID, start, end)
+// dataChatID — чат-источник данных (выборка); postChatID — куда постить. В группе
+// они совпадают; в ЛС (админ) postChatID = ЛС, dataChatID = группа.
+func (d *Digester) PostDigest(ctx context.Context, dataChatID, postChatID int64, start, end time.Time) error {
+	msgs, err := d.msgs.Since(ctx, dataChatID, start, end)
 	if err != nil {
 		return fmt.Errorf("since: %w", err)
 	}
 	if len(msgs) < minDigestMessages {
-		slog.Info("digest: too few messages, skip", "chat_id", chatID, "count", len(msgs))
+		slog.Info("digest: too few messages, skip", "chat_id", dataChatID, "count", len(msgs))
 		return fmt.Errorf("%w: have %d, need %d", ErrTooFewMessages, len(msgs), minDigestMessages)
 	}
 	material := chatFormatForDigest(msgs)
@@ -94,13 +96,13 @@ func (d *Digester) PostDigest(ctx context.Context, chatID int64, start, end time
 
 	header := fmt.Sprintf("📋 Дайджест недели (%s — %s)\n\n",
 		start.Format("02.01"), end.Add(-24*time.Hour).Format("02.01"))
-	if err := d.api.PostMessage(ctx, chatID, header+summary); err != nil {
+	if err := d.api.PostMessage(ctx, postChatID, header+summary); err != nil {
 		return fmt.Errorf("post digest: %w", err)
 	}
 	if _, err := d.db.ExecContext(ctx, `
 		INSERT INTO topic_digests (chat_id, period_start, period_end, summary, posted)
 		VALUES ($1, $2, $3, $4, TRUE)
-	`, chatID, start, end, summary); err != nil {
+	`, dataChatID, start, end, summary); err != nil {
 		slog.Warn("save digest row", "err", err)
 	}
 	return nil

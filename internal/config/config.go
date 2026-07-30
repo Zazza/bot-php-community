@@ -30,6 +30,15 @@ type Config struct {
 	CaptchaTimeout     time.Duration
 	CaptchaMaxAttempts int
 	Probation          time.Duration
+	SpamEnabled        bool
+	SpamFloodMsgs      int
+	SpamFloodWindow    time.Duration
+	SpamWarnMax        int
+	SpamWarnPeriod     time.Duration
+	SpamRestrictHours  time.Duration
+	VoteEnabled        bool
+	VoteWindow         time.Duration
+	VoteQuorum         int
 }
 
 // Load читает env. Необходимые переменные — фаталят при отсутствии.
@@ -52,9 +61,31 @@ func Load() (*Config, error) {
 		CaptchaTimeout:     envDur("PHPBOT_CAPTCHA_TIMEOUT", 3*time.Minute),
 		CaptchaMaxAttempts: envInt("PHPBOT_CAPTCHA_MAX_ATTEMPTS", 3),
 		Probation:          time.Duration(envInt("PHPBOT_PROBATION_HOURS", 6)) * time.Hour,
+		SpamEnabled:        envBool("PHPBOT_SPAM_ENABLED", true),
+		SpamFloodMsgs:      envInt("PHPBOT_SPAM_FLOOD_MSGS", 5),
+		SpamFloodWindow:    envDur("PHPBOT_SPAM_FLOOD_WINDOW", 30*time.Second),
+		SpamWarnMax:        envInt("PHPBOT_SPAM_WARN_MAX", 3),
+		SpamWarnPeriod:     envDur("PHPBOT_SPAM_WARN_PERIOD", 24*time.Hour),
+		SpamRestrictHours:  time.Duration(envInt("PHPBOT_SPAM_RESTRICT_HOURS", 6)) * time.Hour,
+		VoteEnabled:        envBool("PHPBOT_VOTE_ENABLED", true),
+		VoteWindow:         envDur("PHPBOT_VOTE_WINDOW", 15*time.Minute),
+		VoteQuorum:         envInt("PHPBOT_VOTE_QUORUM", 3),
 	}
 	c.AdminIDs = envInt64List("PHPBOT_ADMIN_IDS")
 	c.ChatIDs = envInt64List("PHPBOT_CHAT_ID")
+
+	if c.SpamFloodMsgs < 1 {
+		c.SpamFloodMsgs = 1
+	}
+	if c.SpamWarnMax < 1 {
+		c.SpamWarnMax = 1
+	}
+	if c.VoteQuorum < 1 {
+		c.VoteQuorum = 1
+	}
+	if c.SpamRestrictHours < time.Hour {
+		c.SpamRestrictHours = time.Hour
+	}
 
 	if c.TGToken == "" {
 		return nil, fmt.Errorf("PHPBOT_TG_TOKEN не задан")
