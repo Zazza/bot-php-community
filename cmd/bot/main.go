@@ -80,7 +80,7 @@ func main() {
 	faqRepo := faq.NewRepo(dbx)
 	faqBuilder := faq.NewBuilder(dbx, llmCheap, msgRepo, faqRepo, cfg.ChatIDs)
 
-	answerer := chat.New(llmCheap, msgRepo, vecRepo, webSearcher, faqRepo)
+	answerer := chat.New(llmClient, msgRepo, vecRepo, webSearcher, faqRepo)
 	moderRepo := moderation.NewRepository(dbx)
 
 	b, err := bot.New(cfg.TGToken, bot.WithDefaultHandler(func(_ context.Context, _ *bot.Bot, _ *models.Update) {}))
