@@ -4,6 +4,8 @@ package users
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -74,4 +76,38 @@ func (r *Repository) IsSuspect(ctx context.Context, tgUserID int64) (bool, error
 // MarkBanned помечает пользователя забаненным.
 func (r *Repository) MarkBanned(ctx context.Context, tgUserID int64) error {
 	return r.SetStatus(ctx, tgUserID, "banned")
+}
+
+// TouchUser запоминает @handle пользователя (для разрешения @username → user_id)
+// и лениво нормализует историю: импортированные сообщения хранили display-name,
+// а не @handle — проставляем реальный @handle по user_id. Статус/first_seen не трогаем.
+func (r *Repository) TouchUser(ctx context.Context, userID int64, username string) error {
+	username = strings.TrimSpace(username)
+	if userID == 0 || username == "" {
+		return nil
+	}
+	if _, err := r.db.ExecContext(ctx, `
+		INSERT INTO users (tg_user_id, username) VALUES ($1, $2)
+		ON CONFLICT (tg_user_id) DO UPDATE
+			SET username = EXCLUDED.username
+			WHERE users.username <> EXCLUDED.username
+	`, userID, username); err != nil {
+		return fmt.Errorf("touch user: %w", err)
+	}
+	var need bool
+	if err := r.db.GetContext(ctx, &need,
+		`SELECT EXISTS (SELECT 1 FROM messages WHERE user_id = $1 AND username <> $2 LIMIT 1)`,
+		userID, username); err != nil {
+		return fmt.Errorf("touch user check: %w", err)
+	}
+	if !need {
+		return nil
+	}
+	if _, err := r.db.ExecContext(ctx,
+		`UPDATE messages SET username = $2 WHERE user_id = $1 AND username <> $2`,
+		userID, username); err != nil {
+		return fmt.Errorf("touch user backfill: %w", err)
+	}
+	slog.Info("user history backfill", "user_id", userID, "username", username)
+	return nil
 }

@@ -125,6 +125,14 @@ func (h *Handlers) OnMessage(ctx context.Context, b *bot.Bot, upd *models.Update
 		return
 	}
 
+	// Запомнить @handle автора (все сообщения, включая ЛС) + ленивый бэкфилл
+	// истории: импортированные сообщения хранили display-name, не @handle.
+	if msg.From != nil && msg.From.ID != h.botUserID && msg.From.Username != "" {
+		if err := h.users.TouchUser(ctx, msg.From.ID, msg.From.Username); err != nil {
+			slog.Warn("touch user", "err", err)
+		}
+	}
+
 	// ЛС: админ-команды выполняем против данных группового чата (primaryChatID),
 	// ответ шлём в ЛС. Свободный вопрос (ask) — через pmAnswer. Не-админам — отказ.
 	if msg.Chat.Type == "private" {
