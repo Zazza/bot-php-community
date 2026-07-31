@@ -119,3 +119,21 @@ func (r *Repository) CountBallots(ctx context.Context, quizID int64) (total, cor
 	}
 	return row.Total, row.Correct, nil
 }
+
+// BallotCounts возвращает распределение голосов по индексам опций (для раскрытия ответа).
+func (r *Repository) BallotCounts(ctx context.Context, quizID int64) (map[int]int, error) {
+	var rows []struct {
+		Choice int `db:"choice"`
+		Cnt    int `db:"cnt"`
+	}
+	if err := r.db.SelectContext(ctx, &rows,
+		`SELECT choice, count(*) AS cnt FROM quiz_ballots WHERE quiz_id = $1 GROUP BY choice`,
+		quizID); err != nil {
+		return nil, fmt.Errorf("ballot counts: %w", err)
+	}
+	m := make(map[int]int, len(rows))
+	for _, rr := range rows {
+		m[rr.Choice] = rr.Cnt
+	}
+	return m, nil
+}

@@ -63,13 +63,30 @@ func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery)
 	if err != nil {
 		return "Некорректная кнопка"
 	}
-	choice, err := strconv.Atoi(parts[2])
-	if err != nil || choice < 0 || choice > 3 {
-		return "Некорректная кнопка"
-	}
 	row, err := q.repo.Get(ctx, id)
 	if err != nil || row == nil {
 		return "Вопрос уже не активен"
+	}
+
+	// «Показать ответ»: раскрываем правильный вариант + распределение, убираем кнопки.
+	if parts[2] == "r" {
+		counts, _ := q.repo.BallotCounts(ctx, id)
+		text := renderReveal(row, counts)
+		empty := models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{}}
+		if row.MessageID != 0 {
+			if _, eerr := q.api.EditMessageText(ctx, &bot.EditMessageTextParams{
+				ChatID: row.ChatID, MessageID: int(row.MessageID),
+				Text: text, ReplyMarkup: &empty,
+			}); eerr != nil {
+				slog.Warn("quiz reveal edit", "err", eerr)
+			}
+		}
+		return ""
+	}
+
+	choice, err := strconv.Atoi(parts[2])
+	if err != nil || choice < 0 || choice > 3 {
+		return "Некорректная кнопка"
 	}
 
 	isNew, err := q.repo.RecordBallot(ctx, id, cb.From.ID, choice)
@@ -123,6 +140,35 @@ func renderQuestion(prompt string, opts []string, total, correct int) string {
 	return b.String()
 }
 
+// renderReveal раскрывает правильный вариант и распределение голосов по опциям.
+func renderReveal(row *Row, counts map[int]int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "🧩 %s\n\n", row.Question)
+	letters := "ABCD"
+	opts := row.Opts()
+	total, correct := 0, 0
+	for i, o := range opts {
+		if i >= len(letters) {
+			break
+		}
+		o = strings.TrimSpace(o)
+		if o == "" {
+			continue
+		}
+		c := counts[i]
+		total += c
+		mark := ""
+		if i == row.Correct {
+			mark = " ✅"
+			correct = c
+		}
+		fmt.Fprintf(&b, "%c) %s — %d%s\n", letters[i], o, c, mark)
+	}
+	fmt.Fprintf(&b, "\nПравильно: %c) %s\n", letters[row.Correct], strings.TrimSpace(opts[row.Correct]))
+	fmt.Fprintf(&b, "🗳 Ответили: %d · Верно: %d", total, correct)
+	return b.String()
+}
+
 // quizKeyboard строит inline-кнопки вариантов. callback_data: quiz:<id>:<opt index>.
 func quizKeyboard(quizID int64, opts []string) models.InlineKeyboardMarkup {
 	prefix := "quiz:" + strconv.FormatInt(quizID, 10) + ":"
@@ -149,5 +195,10 @@ func quizKeyboard(quizID int64, opts []string) models.InlineKeyboardMarkup {
 		}
 		rows = append(rows, btns[i:end])
 	}
+	// отдельной строкой — кнопка раскрытия правильного ответа (callback_data quiz:<id>:r).
+	rows = append(rows, []models.InlineKeyboardButton{{
+		Text:         "👁 Показать ответ",
+		CallbackData: prefix + "r",
+	}})
 	return models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }

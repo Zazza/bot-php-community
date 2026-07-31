@@ -86,3 +86,21 @@ func TestRenderQuestion(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderReveal(t *testing.T) {
+	row := &Row{Question: "Кто?", Opt1: "alice", Opt2: "bob", Opt3: "carol", Opt4: "dave", Correct: 1}
+	counts := map[int]int{0: 2, 1: 3, 3: 1} // bob (idx1) — верный
+	got := renderReveal(row, counts)
+	for _, want := range []string{
+		"A) alice — 2",
+		"B) bob — 3 ✅",
+		"C) carol — 0",
+		"D) dave — 1",
+		"Правильно: B) bob",
+		"Ответили: 6 · Верно: 3",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}
