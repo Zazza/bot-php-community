@@ -13,6 +13,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"phpbot/internal/anniv"
 	"phpbot/internal/chat"
 	"phpbot/internal/config"
 	"phpbot/internal/db"
@@ -21,6 +22,7 @@ import (
 	"phpbot/internal/messages"
 	"phpbot/internal/moderation"
 	"phpbot/internal/prompts"
+	"phpbot/internal/quiz"
 	"phpbot/internal/tg"
 	"phpbot/internal/topics"
 	"phpbot/internal/users"
@@ -122,12 +124,17 @@ func main() {
 	topicsSched := topics.New(dbx, llmCheap, msgRepo, poster, cfg.ChatIDs, cfg.QuietThreshold)
 	digester := topics.NewDigester(dbx, llmCheap, msgRepo, poster, cfg.ChatIDs)
 
+	quizRepo := quiz.NewRepository(dbx)
+	quizSvc := quiz.New(b, llmCheap, msgRepo, quizRepo, cfg.ChatIDs)
+	quizSched := quiz.NewScheduler(quizSvc)
+	annivSched := anniv.New(userRepo, poster, cfg.ChatIDs)
+
 	handlers := tg.NewHandlers(tg.HandlersDeps{
 		API: b, ChatIDs: cfg.ChatIDs, BotUserID: me.ID,
 		Moderation: moderFlow, Spam: spamFilter, Vote: voteKick,
 		Users: userRepo, Msgs: msgRepo, Vec: vecRepo,
 		Answerer: answerer, Topics: topicsSched, Digester: digester,
-		FAQ: faqRepo, FAQBuilder: faqBuilder,
+		FAQ: faqRepo, FAQBuilder: faqBuilder, Quiz: quizSvc,
 	})
 	handlers.SetBotUsername(me.Username)
 
@@ -142,6 +149,18 @@ func main() {
 	}
 	if err := faqBuilder.Start(ctx, "0 4 * * 1"); err != nil {
 		slog.Error("faq cron start", "err", err)
+	}
+	if cfg.QuizEnabled {
+		if err := quizSched.Start(ctx, cfg.QuizCron); err != nil {
+			slog.Error("quiz cron start", "err", err)
+		}
+		defer quizSched.Stop()
+	}
+	if cfg.AnniversaryEnabled {
+		if err := annivSched.Start(ctx, cfg.AnniversaryCron); err != nil {
+			slog.Error("anniversary cron start", "err", err)
+		}
+		defer annivSched.Stop()
 	}
 	defer topicsSched.Stop()
 	defer digester.Stop()

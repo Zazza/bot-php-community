@@ -242,6 +242,24 @@ func (a *Answerer) TopicOverview(ctx context.Context, topic string, msgs []messa
 	return resp, nil
 }
 
+// Profile пишет «визитку» участника по собранной статистике и выборке сообщений.
+// Данные идут отдельным user-сообщением — системный промпт (me.txt) статичен (анти-инъекция).
+func (a *Answerer) Profile(ctx context.Context, data string) (string, error) {
+	system := prompts.Get(prompts.Me)
+	resp, inTok, outTok, err := a.llm.Chat(ctx, []llm.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: data},
+	})
+	if err != nil {
+		return "", fmt.Errorf("profile llm: %w", err)
+	}
+	slog.Info("profile", "in", inTok, "out", outTok)
+	if len(resp) > maxAnswerLen {
+		resp = resp[:maxAnswerLen] + "\n…(обрезано)"
+	}
+	return resp, nil
+}
+
 // buildContextBlock формирует текстовый блок контекста для системного промпта.
 func buildContextBlock(rag []messages.Message, recent []messages.Message, web []websearch.Result) string {
 	var b strings.Builder

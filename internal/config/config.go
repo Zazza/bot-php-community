@@ -40,6 +40,10 @@ type Config struct {
 	VoteEnabled        bool
 	VoteWindow         time.Duration
 	VoteQuorum         int
+	AnniversaryCron    string
+	AnniversaryEnabled bool
+	QuizCron           string
+	QuizEnabled        bool
 }
 
 // Load читает env. Необходимые переменные — фаталят при отсутствии.
@@ -72,6 +76,10 @@ func Load() (*Config, error) {
 		VoteEnabled:        envBool("PHPBOT_VOTE_ENABLED", true),
 		VoteWindow:         envDur("PHPBOT_VOTE_WINDOW", 15*time.Minute),
 		VoteQuorum:         envInt("PHPBOT_VOTE_QUORUM", 3),
+		AnniversaryCron:    envOr("PHPBOT_ANNIVERSARY_CRON", "0 8 * * *"),
+		AnniversaryEnabled: envBool("PHPBOT_ANNIVERSARY_ENABLED", true),
+		QuizCron:           envOr("PHPBOT_QUIZ_CRON", "0 19 * * *"),
+		QuizEnabled:        envBool("PHPBOT_QUIZ_ENABLED", true),
 	}
 	c.AdminIDs = envInt64List("PHPBOT_ADMIN_IDS")
 	c.ChatIDs = envInt64List("PHPBOT_CHAT_ID")

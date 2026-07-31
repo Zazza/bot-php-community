@@ -260,6 +260,145 @@ func (r *Repository) Stats(ctx context.Context, chatID int64, since, until *time
 	return s, nil
 }
 
+// UserStats — поведенческая сводка участника (для /я).
+type UserStats struct {
+	Count    int
+	CodeMsgs int
+	AvgLen   float64
+	PeakHour int // 0..23, -1 если сообщений нет
+	FirstTS  time.Time
+}
+
+// UserStats считает по участнику: число сообщений, среднюю длину, число «кодовых» сообщений,
+// пик активности по часу и дату первого сообщения. Колонка user_id (не tg_user_id).
+func (r *Repository) UserStats(ctx context.Context, chatID, userID int64) (*UserStats, error) {
+	s := &UserStats{PeakHour: -1}
+	var row struct {
+		Count    int       `db:"cnt"`
+		CodeMsgs int       `db:"code_msgs"`
+		AvgLen   float64   `db:"avg_len"`
+		FirstTS  time.Time `db:"first_ts"`
+	}
+	if err := r.db.GetContext(ctx, &row, `
+		SELECT count(*) AS cnt,
+		       count(*) FILTER (WHERE text ILIKE '%'||repeat(chr(96),3)||'%' OR text LIKE '%=>%' OR text LIKE '%;') AS code_msgs,
+		       COALESCE(avg(char_length(text)), 0) AS avg_len,
+		       COALESCE(min(ts), now()) AS first_ts
+		FROM messages WHERE chat_id = $1 AND user_id = $2
+	`, chatID, userID); err != nil {
+		return nil, fmt.Errorf("user stats: %w", err)
+	}
+	s.Count, s.CodeMsgs, s.AvgLen, s.FirstTS = row.Count, row.CodeMsgs, row.AvgLen, row.FirstTS
+	if s.Count > 0 {
+		var ph struct {
+			H int `db:"h"`
+		}
+		if err := r.db.GetContext(ctx, &ph, `
+			SELECT EXTRACT(HOUR FROM ts)::int AS h
+			FROM messages WHERE chat_id = $1 AND user_id = $2
+			GROUP BY h ORDER BY count(*) DESC, h ASC LIMIT 1
+		`, chatID, userID); err == nil {
+			s.PeakHour = ph.H
+		}
+	}
+	return s, nil
+}
+
+// FirstMention — автор и время его первого упоминания темы.
+type FirstMention struct {
+	UserID   int64     `db:"user_id"`
+	Username string    `db:"username"`
+	FirstTS  time.Time `db:"first_ts"`
+}
+
+// FirstByKeyword — авторы, упоминавшие тему, упорядоченные по времени ПЕРВОГО упоминания
+// (кто первым заговорил). Клон ExpertByKeyword, но MIN(ts) вместо count(*).
+func (r *Repository) FirstByKeyword(ctx context.Context, chatID int64, topic string, limit int) ([]FirstMention, error) {
+	normalized := normalizeTopic(topic)
+	if len(normalized) < 2 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	var rows []FirstMention
+	if err := r.db.SelectContext(ctx, &rows, `
+		SELECT m.user_id,
+		       COALESCE(NULLIF(MAX(u.username),''), NULLIF(MAX(m.username),''), 'user') AS username,
+		       MIN(m.ts) AS first_ts
+		FROM messages m
+		LEFT JOIN users u ON u.tg_user_id = m.user_id
+		WHERE m.chat_id = $1 AND m.user_id <> 0
+		  AND regexp_replace(lower(m.text), '[^0-9a-zа-яё]', '', 'g') ILIKE $2
+		GROUP BY m.user_id
+		ORDER BY first_ts ASC
+		LIMIT $3
+	`, chatID, "%"+normalized+"%", limit); err != nil {
+		return nil, fmt.Errorf("first by keyword: %w", err)
+	}
+	return rows, nil
+}
+
+// MentionCount — число сообщений чата, упоминающих тему (keyword). Источник правды для
+// вопроса викторины «правда ли упоминали X».
+func (r *Repository) MentionCount(ctx context.Context, chatID int64, topic string) (int, error) {
+	normalized := normalizeTopic(topic)
+	if len(normalized) < 2 {
+		return 0, nil
+	}
+	var n int
+	if err := r.db.GetContext(ctx, &n, `
+		SELECT count(*) FROM messages
+		WHERE chat_id = $1 AND user_id <> 0
+		  AND regexp_replace(lower(text), '[^0-9a-zа-яё]', '', 'g') ILIKE $2
+	`, chatID, "%"+normalized+"%"); err != nil {
+		return 0, fmt.Errorf("mention count: %w", err)
+	}
+	return n, nil
+}
+
+// LeaderRow — участник и его показатель (счёт/среднее) по критерию лидерборда.
+type LeaderRow struct {
+	UserID   int64   `db:"user_id"`
+	Username string  `db:"username"`
+	Score    float64 `db:"score"`
+}
+
+// Leaderboard — топ участников по критерию: "night" (сообщения 0-5 утра), "code" (с кодом),
+// "long" (средняя длина). Показатель > 0, сортировка по убыванию.
+func (r *Repository) Leaderboard(ctx context.Context, chatID int64, criterion string, limit int) ([]LeaderRow, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	var agg string
+	switch criterion {
+	case "night":
+		agg = `count(*) FILTER (WHERE EXTRACT(HOUR FROM ts) < 6)`
+	case "code":
+		agg = `count(*) FILTER (WHERE text ILIKE '%'||repeat(chr(96),3)||'%' OR text LIKE '%=>%' OR text LIKE '%;')`
+	case "long":
+		agg = `avg(char_length(text))`
+	default:
+		return nil, nil
+	}
+	var rows []LeaderRow
+	if err := r.db.SelectContext(ctx, &rows, `
+		SELECT m.user_id,
+		       COALESCE(NULLIF(MAX(u.username),''), NULLIF(MAX(m.username),''), 'user') AS username,
+		       `+agg+` AS score
+		FROM messages m
+		LEFT JOIN users u ON u.tg_user_id = m.user_id
+		WHERE m.chat_id = $1 AND m.user_id <> 0
+		GROUP BY m.user_id
+		HAVING `+agg+` > 0
+		ORDER BY score DESC
+		LIMIT $2
+	`, chatID, limit); err != nil {
+		return nil, fmt.Errorf("leaderboard: %w", err)
+	}
+	return rows, nil
+}
+
 // FormatContext собирает сообщения в строку для подачи в системный промпт LLM.
 func FormatContext(msgs []Message) string {
 	var b strings.Builder

@@ -37,4 +37,6 @@ const (
 	Welcome = "welcome.txt"
 	FAQ     = "faq.txt"
 	Search  = "search.txt"
+	Me      = "me.txt"
+	Quiz    = "quiz.txt"
 )

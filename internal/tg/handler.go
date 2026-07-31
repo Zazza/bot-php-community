@@ -16,6 +16,7 @@ import (
 	"phpbot/internal/faq"
 	"phpbot/internal/messages"
 	"phpbot/internal/moderation"
+	"phpbot/internal/quiz"
 	"phpbot/internal/topics"
 	"phpbot/internal/users"
 )
@@ -54,6 +55,7 @@ type Handlers struct {
 	digester   *topics.Digester
 	faq        *faq.Repo
 	faqBuilder *faq.Builder
+	quiz       *quiz.Quiz
 }
 
 // HandlersDeps — зависимости для сборки Handlers.
@@ -72,6 +74,7 @@ type HandlersDeps struct {
 	Digester   *topics.Digester
 	FAQ        *faq.Repo
 	FAQBuilder *faq.Builder
+	Quiz       *quiz.Quiz
 }
 
 // NewHandlers собирает Handlers.
@@ -90,6 +93,7 @@ func NewHandlers(d HandlersDeps) *Handlers {
 		digester:   d.Digester,
 		faq:        d.FAQ,
 		faqBuilder: d.FAQBuilder,
+		quiz:       d.Quiz,
 		chatIDs:    make(map[int64]struct{}, len(d.ChatIDs)),
 	}
 	for _, id := range d.ChatIDs {
@@ -243,6 +247,15 @@ func (h *Handlers) OnCallbackQuery(ctx context.Context, b *bot.Bot, upd *models.
 		})
 		return
 	}
+	if strings.HasPrefix(cb.Data, "quiz:") && h.quiz != nil {
+		alert := h.quiz.HandleQuizCallback(ctx, cb)
+		if alert != "" {
+			_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+				CallbackQueryID: cb.ID, Text: alert,
+			})
+		}
+		return
+	}
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
 		CallbackQueryID: cb.ID, Text: "—",
 	})
@@ -276,6 +289,10 @@ func (h *Handlers) dispatchCommand(ctx context.Context, replyChatID, dataChatID 
 		h.cmdKick(ctx, replyChatID, dataChatID, msg, args)
 	case "report":
 		h.cmdReport(ctx, replyChatID, dataChatID, msg, args)
+	case "я":
+		h.cmdMe(ctx, replyChatID, dataChatID, msg)
+	case "quiz":
+		h.cmdQuiz(ctx, replyChatID, dataChatID, msg)
 	default:
 		slog.Debug("unknown command", "cmd", cmd)
 	}
@@ -290,6 +307,7 @@ func (h *Handlers) cmdHelp(ctx context.Context, replyChatID int64) {
 /search <запрос> — поиск по истории чата
 /expert <тема> — к кому обратиться по теме
 /stats — статистика чата
+/я — твоя карточка по истории чата
 /faq — список частых вопросов (или /faq <id>)
 /help — этот текст
 
@@ -301,12 +319,97 @@ func (h *Handlers) cmdHelp(ctx context.Context, replyChatID int64) {
 /faq edit <id> <ответ> — правка ответа FAQ
 /faq build — пересобрать FAQ из истории
 /kick @user — кик пользователя
+/quiz — запостить вопрос викторины
 
 *Для всех:*
 /report (reply на сообщение или @user) — голосование за изгнание
 
 Бот также отвечает на @упоминание и reply на своё сообщение.`
 	_ = SendMessage(ctx, h.api, replyChatID, text)
+}
+
+// cmdMe — личная карточка участника по его истории (стаж, активность, стиль — через LLM).
+// Публично в чат. dataChatID — по какому чату считаем статистику.
+func (h *Handlers) cmdMe(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message) {
+	if msg.From == nil {
+		return
+	}
+	userID := msg.From.ID
+	go func() {
+		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
+		defer cancel()
+		st, err := h.msgs.UserStats(ctxBg, dataChatID, userID)
+		if err != nil {
+			slog.Error("me user stats", "err", err)
+			_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось собрать статистику.")
+			return
+		}
+		u, _ := h.users.Get(ctxBg, userID)
+		sample, _ := h.msgs.LastByUser(ctxBg, userID, 40)
+
+		var b strings.Builder
+		fmt.Fprintf(&b, "Участник: %s\n", replyUsername(msg.From))
+		if u != nil && !u.FirstSeen.IsZero() {
+			years := time.Now().Year() - u.FirstSeen.Year()
+			fmt.Fprintf(&b, "В чате с: %s (%d %s)\n", u.FirstSeen.Format("02.01.2006"), years, pluralYears(years))
+		}
+		fmt.Fprintf(&b, "Сообщений: %d\n", st.Count)
+		fmt.Fprintf(&b, "Средняя длина: %.0f симв.\n", st.AvgLen)
+		fmt.Fprintf(&b, "Сообщений с кодом: %d\n", st.CodeMsgs)
+		if st.PeakHour >= 0 {
+			fmt.Fprintf(&b, "Пик активности: %02d:00–%02d:00\n", st.PeakHour, (st.PeakHour+1)%24)
+		}
+		b.WriteString("\nПоследние сообщения:\n")
+		for _, m := range sample {
+			line := strings.ReplaceAll(m.Text, "\n", " ")
+			if len(line) > 160 {
+				line = line[:160] + "…"
+			}
+			fmt.Fprintf(&b, "[%s] %s\n", m.TS.Format("02.01 15:04"), line)
+		}
+		resp, err := h.answerer.Profile(ctxBg, b.String())
+		if err != nil {
+			slog.Error("me profile", "err", err)
+			_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось собрать карточку, попробуй позже.")
+			return
+		}
+		_ = SendMessage(ctxBg, h.api, replyChatID, resp)
+	}()
+}
+
+// cmdQuiz — админский запуск викторины: вопрос постится в групповой чат (dataChatID).
+func (h *Handlers) cmdQuiz(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message) {
+	if msg.From == nil || !h.moderation.IsAdmin(msg.From.ID) {
+		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
+		return
+	}
+	if h.quiz == nil {
+		_ = SendMessage(ctx, h.api, replyChatID, "Викторина выключена.")
+		return
+	}
+	go func() {
+		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
+		defer cancel()
+		if err := h.quiz.Post(ctxBg, dataChatID); err != nil {
+			slog.Error("quiz post", "err", err)
+			_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось собрать вопрос викторины: "+err.Error())
+		}
+	}()
+}
+
+// pluralYears — склонение «год/года/лет».
+func pluralYears(n int) string {
+	if n%100 >= 11 && n%100 <= 14 {
+		return "лет"
+	}
+	switch n % 10 {
+	case 1:
+		return "год"
+	case 2, 3, 4:
+		return "года"
+	default:
+		return "лет"
+	}
 }
 
 func (h *Handlers) cmdStats(ctx context.Context, replyChatID, dataChatID int64, args string) {
