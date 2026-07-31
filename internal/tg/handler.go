@@ -344,14 +344,14 @@ func (h *Handlers) cmdMe(ctx context.Context, replyChatID, dataChatID int64, msg
 			_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось собрать статистику.")
 			return
 		}
-		u, _ := h.users.Get(ctxBg, userID)
-		sample, _ := h.msgs.LastByUser(ctxBg, userID, 40)
+		oldest, _ := h.msgs.FirstByUser(ctxBg, userID, 20)
+		recent, _ := h.msgs.LastByUser(ctxBg, userID, 20)
 
 		var b strings.Builder
 		fmt.Fprintf(&b, "Участник: %s\n", replyUsername(msg.From))
-		if u != nil && !u.FirstSeen.IsZero() {
-			years := time.Now().Year() - u.FirstSeen.Year()
-			fmt.Fprintf(&b, "В чате с: %s (%d %s)\n", u.FirstSeen.Format("02.01.2006"), years, pluralYears(years))
+		if !st.FirstTS.IsZero() {
+			years := time.Now().Year() - st.FirstTS.Year()
+			fmt.Fprintf(&b, "В чате с: %s (%d %s)\n", st.FirstTS.Format("02.01.2006"), years, pluralYears(years))
 		}
 		fmt.Fprintf(&b, "Сообщений: %d\n", st.Count)
 		fmt.Fprintf(&b, "Средняя длина: %.0f симв.\n", st.AvgLen)
@@ -359,13 +359,21 @@ func (h *Handlers) cmdMe(ctx context.Context, replyChatID, dataChatID int64, msg
 		if st.PeakHour >= 0 {
 			fmt.Fprintf(&b, "Пик активности: %02d:00–%02d:00\n", st.PeakHour, (st.PeakHour+1)%24)
 		}
-		b.WriteString("\nПоследние сообщения:\n")
-		for _, m := range sample {
+		b.WriteString("\n[Ранние сообщения — как начинал]\n")
+		for _, m := range oldest {
 			line := strings.ReplaceAll(m.Text, "\n", " ")
 			if len(line) > 160 {
 				line = line[:160] + "…"
 			}
-			fmt.Fprintf(&b, "[%s] %s\n", m.TS.Format("02.01 15:04"), line)
+			fmt.Fprintf(&b, "[%s] %s\n", m.TS.Format("02.01.2006"), line)
+		}
+		b.WriteString("\n[Недавние сообщения]\n")
+		for _, m := range recent {
+			line := strings.ReplaceAll(m.Text, "\n", " ")
+			if len(line) > 160 {
+				line = line[:160] + "…"
+			}
+			fmt.Fprintf(&b, "[%s] %s\n", m.TS.Format("02.01.2006"), line)
 		}
 		resp, err := h.answerer.Profile(ctxBg, b.String())
 		if err != nil {

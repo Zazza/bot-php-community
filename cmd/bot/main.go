@@ -127,7 +127,7 @@ func main() {
 	quizRepo := quiz.NewRepository(dbx)
 	quizSvc := quiz.New(b, llmCheap, msgRepo, quizRepo, cfg.ChatIDs)
 	quizSched := quiz.NewScheduler(quizSvc)
-	annivSched := anniv.New(userRepo, poster, cfg.ChatIDs)
+	annivSched := anniv.New(msgRepo, poster, cfg.ChatIDs)
 
 	handlers := tg.NewHandlers(tg.HandlersDeps{
 		API: b, ChatIDs: cfg.ChatIDs, BotUserID: me.ID,

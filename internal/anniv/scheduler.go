@@ -1,4 +1,4 @@
-// Package anniv — ежедневное поздравление участников с годовщиной в чате по users.first_seen.
+// Package anniv — ежедневное поздравление участников с годовщиной первого сообщения в чате.
 package anniv
 
 import (
@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/robfig/cron/v3"
-	"phpbot/internal/users"
+	"phpbot/internal/messages"
 )
 
 // Poster — минимальный интерфейс отправки (удовлетворяется tg.PosterImpl структурно).
@@ -18,15 +18,15 @@ type Poster interface {
 
 // Scheduler ежедневно поздравляет именинников.
 type Scheduler struct {
-	users   *users.Repository
+	msgs    *messages.Repository
 	api     Poster
 	chatIDs []int64
 	cron    *cron.Cron
 }
 
 // New создаёт scheduler.
-func New(usersRepo *users.Repository, api Poster, chatIDs []int64) *Scheduler {
-	return &Scheduler{users: usersRepo, api: api, chatIDs: chatIDs}
+func New(msgs *messages.Repository, api Poster, chatIDs []int64) *Scheduler {
+	return &Scheduler{msgs: msgs, api: api, chatIDs: chatIDs}
 }
 
 // Start запускает cron. Спецификация — стандартные 5 полей.
@@ -55,22 +55,19 @@ func (s *Scheduler) Stop() {
 
 func (s *Scheduler) run(ctx context.Context) {
 	now := time.Now()
-	us, err := s.users.Anniversaries(ctx, now)
-	if err != nil {
-		slog.Error("anniversary query", "err", err)
-		return
-	}
-	if len(us) == 0 {
-		return
-	}
 	for _, chatID := range s.chatIDs {
+		us, err := s.msgs.Anniversaries(ctx, chatID, now)
+		if err != nil {
+			slog.Error("anniversary query", "err", err, "chat_id", chatID)
+			continue
+		}
 		for _, u := range us {
-			years := now.Year() - u.FirstSeen.Year()
+			years := now.Year() - u.First.Year()
 			if years <= 0 {
 				continue
 			}
 			handle := u.Username
-			if handle == "" {
+			if handle == "" || handle == "user" {
 				handle = "участник"
 			} else {
 				handle = "@" + handle

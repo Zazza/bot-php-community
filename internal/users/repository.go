@@ -78,22 +78,6 @@ func (r *Repository) MarkBanned(ctx context.Context, tgUserID int64) error {
 	return r.SetStatus(ctx, tgUserID, "banned")
 }
 
-// Anniversaries возвращает участников, у кого сегодня годовщина в чате (совпадает месяц/день
-// first_seen, но не текущий год), кроме забаненных. Для ежедневного поздравления.
-func (r *Repository) Anniversaries(ctx context.Context, now time.Time) ([]User, error) {
-	var rows []User
-	if err := r.db.SelectContext(ctx, &rows, `
-		SELECT tg_user_id, username, first_seen, status FROM users
-		WHERE status <> 'banned'
-		  AND EXTRACT(MONTH FROM first_seen) = EXTRACT(MONTH FROM $1)
-		  AND EXTRACT(DAY   FROM first_seen) = EXTRACT(DAY   FROM $1)
-		  AND EXTRACT(YEAR  FROM first_seen) <> EXTRACT(YEAR FROM $1)
-	`, now); err != nil {
-		return nil, fmt.Errorf("anniversaries: %w", err)
-	}
-	return rows, nil
-}
-
 // TouchUser запоминает @handle пользователя (для разрешения @username → user_id)
 // и лениво нормализует историю: импортированные сообщения хранили display-name,
 // а не @handle — проставляем реальный @handle по user_id. Статус/first_seen не трогаем.

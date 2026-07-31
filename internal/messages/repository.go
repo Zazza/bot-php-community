@@ -129,6 +129,24 @@ func (r *Repository) LastByUser(ctx context.Context, userID int64, limit int) ([
 	return rows, nil
 }
 
+// FirstByUser возвращает ПЕРВЫЕ N сообщений пользователя (хронологически с начала).
+func (r *Repository) FirstByUser(ctx context.Context, userID int64, limit int) ([]Message, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	var rows []Message
+	if err := r.db.SelectContext(ctx, &rows, `
+		SELECT id, chat_id, user_id, username, text, ts, reply_to_id
+		FROM messages
+		WHERE user_id = $1
+		ORDER BY ts ASC
+		LIMIT $2
+	`, userID, limit); err != nil {
+		return nil, fmt.Errorf("first by user: %w", err)
+	}
+	return rows, nil
+}
+
 // ByUsername возвращает последние сообщения пользователя в чате по @username за период.
 // Порядок DESC (свежие первыми). since/until == nil — без границы.
 func (r *Repository) ByUsername(ctx context.Context, chatID int64, username string, since, until *time.Time, limit int) ([]Message, error) {
@@ -395,6 +413,35 @@ func (r *Repository) Leaderboard(ctx context.Context, chatID int64, criterion st
 		LIMIT $2
 	`, chatID, limit); err != nil {
 		return nil, fmt.Errorf("leaderboard: %w", err)
+	}
+	return rows, nil
+}
+
+// Anniversary — участник и дата его первого сообщения в чате.
+type Anniversary struct {
+	UserID   int64
+	Username string
+	First    time.Time
+}
+
+// Anniversaries возвращает участников, у кого сегодня годовщина ПЕРВОГО сообщения в чате
+// (по MIN(ts) сообщений — реальный заход, а не users.first_seen, который фиксирует лишь
+// момент, когда бот начал отслеживать юзера). Месяц/день совпадают, год — не текущий.
+func (r *Repository) Anniversaries(ctx context.Context, chatID int64, now time.Time) ([]Anniversary, error) {
+	var rows []Anniversary
+	if err := r.db.SelectContext(ctx, &rows, `
+		SELECT m.user_id,
+		       COALESCE(NULLIF(MAX(u.username),''), NULLIF(MAX(m.username),''), 'user') AS username,
+		       MIN(m.ts) AS first
+		FROM messages m
+		LEFT JOIN users u ON u.tg_user_id = m.user_id
+		WHERE m.chat_id = $1 AND m.user_id <> 0
+		GROUP BY m.user_id
+		HAVING EXTRACT(MONTH FROM MIN(m.ts)) = EXTRACT(MONTH FROM $2)
+		   AND EXTRACT(DAY   FROM MIN(m.ts)) = EXTRACT(DAY   FROM $2)
+		   AND EXTRACT(YEAR  FROM MIN(m.ts)) <> EXTRACT(YEAR FROM $2)
+	`, chatID, now); err != nil {
+		return nil, fmt.Errorf("anniversaries: %w", err)
 	}
 	return rows, nil
 }
