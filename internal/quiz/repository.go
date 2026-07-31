@@ -88,6 +88,20 @@ func (r *Repository) Get(ctx context.Context, id int64) (*Row, error) {
 	return &row, nil
 }
 
+// LastKind возвращает тип последней викторины в чате (чтобы не повторять два дня подряд).
+// Нет викторин — ("", nil).
+func (r *Repository) LastKind(ctx context.Context, chatID int64) (string, error) {
+	var k string
+	if err := r.db.GetContext(ctx, &k,
+		`SELECT kind FROM quizzes WHERE chat_id = $1 ORDER BY id DESC LIMIT 1`, chatID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("last kind: %w", err)
+	}
+	return k, nil
+}
+
 // RecordBallot учитывает ответ участника. Возвращает new=true, если голос новый
 // (ON CONFLICT DO NOTHING — один ответ на участника).
 func (r *Repository) RecordBallot(ctx context.Context, quizID, userID int64, choice int) (bool, error) {

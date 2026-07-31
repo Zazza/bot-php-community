@@ -23,7 +23,7 @@ type Quiz struct {
 
 // New создаёт Quiz.
 func New(api *bot.Bot, llm *llm.LLMClient, msgs *messages.Repository, repo *Repository, chatIDs []int64) *Quiz {
-	return &Quiz{api: api, gen: &Generator{msgs: msgs, llm: llm}, repo: repo, chatIDs: chatIDs}
+	return &Quiz{api: api, gen: &Generator{msgs: msgs, llm: llm, repo: repo}, repo: repo, chatIDs: chatIDs}
 }
 
 // Post генерирует вопрос и шлёт его с inline-кнопками в чат.
@@ -68,20 +68,11 @@ func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery)
 		return "Вопрос уже не активен"
 	}
 
-	// «Показать ответ»: раскрываем правильный вариант + распределение, убираем кнопки.
+	// «Показать ответ»: ответ виден ТОЛЬКО нажавшему (приватный тост). Сообщение не
+	// меняем, кнопки не снимаем, голосование не срываем — один человек не раскрывает ответ всем.
 	if parts[2] == "r" {
 		counts, _ := q.repo.BallotCounts(ctx, id)
-		text := renderReveal(row, counts)
-		empty := models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{}}
-		if row.MessageID != 0 {
-			if _, eerr := q.api.EditMessageText(ctx, &bot.EditMessageTextParams{
-				ChatID: row.ChatID, MessageID: int(row.MessageID),
-				Text: text, ReplyMarkup: &empty,
-			}); eerr != nil {
-				slog.Warn("quiz reveal edit", "err", eerr)
-			}
-		}
-		return ""
+		return revealToast(row, counts)
 	}
 
 	choice, err := strconv.Atoi(parts[2])
@@ -144,33 +135,19 @@ func renderQuestion(prompt string, opts []string, total, correct int) string {
 	return b.String()
 }
 
-// renderReveal раскрывает правильный вариант и распределение голосов по опциям.
-func renderReveal(row *Row, counts map[int]int) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "🧩 %s\n\n", row.Question)
+// revealToast строит приватный текст правильного ответа для нажавшего «Показать ответ».
+func revealToast(row *Row, counts map[int]int) string {
 	letters := "ABCD"
 	opts := row.Opts()
-	total, correct := 0, 0
-	for i, o := range opts {
-		if i >= len(letters) {
-			break
-		}
-		o = strings.TrimSpace(o)
-		if o == "" {
-			continue
-		}
-		c := counts[i]
+	total := 0
+	for _, c := range counts {
 		total += c
-		mark := ""
-		if i == row.Correct {
-			mark = " ✅"
-			correct = c
-		}
-		fmt.Fprintf(&b, "%c) %s — %d%s\n", letters[i], o, c, mark)
 	}
-	fmt.Fprintf(&b, "\nПравильно: %c) %s\n", letters[row.Correct], strings.TrimSpace(opts[row.Correct]))
-	fmt.Fprintf(&b, "🗳 Ответили: %d · Верно: %d", total, correct)
-	return b.String()
+	s := fmt.Sprintf("👁 Правильно: %c) %s", letters[row.Correct], strings.TrimSpace(opts[row.Correct]))
+	if total > 0 {
+		s += fmt.Sprintf(" (верно %d из %d)", counts[row.Correct], total)
+	}
+	return s
 }
 
 // quizKeyboard строит inline-кнопки вариантов. callback_data: quiz:<id>:<opt index>.

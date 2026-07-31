@@ -31,11 +31,23 @@ var seedTerms = []string{
 type Generator struct {
 	msgs *messages.Repository
 	llm  *llm.LLMClient
+	repo *Repository
 }
 
 // Generate перебирает типы в случайном порядке и возвращает первый собравшийся.
+// Тип предыдущей викторины в чате исключается, чтобы не было повтора два дня подряд.
 func (g *Generator) Generate(ctx context.Context, chatID int64) (*Question, error) {
-	kinds := []string{"whoTop", "whoFirst", "stat", "mentioned"}
+	last, _ := g.repo.LastKind(ctx, chatID)
+	all := []string{"whoTop", "stat", "mentioned"}
+	kinds := make([]string, 0, len(all))
+	for _, k := range all {
+		if k != last {
+			kinds = append(kinds, k)
+		}
+	}
+	if len(kinds) == 0 {
+		kinds = all
+	}
 	rand.Shuffle(len(kinds), func(i, j int) { kinds[i], kinds[j] = kinds[j], kinds[i] })
 	for _, k := range kinds {
 		var (
@@ -45,8 +57,6 @@ func (g *Generator) Generate(ctx context.Context, chatID int64) (*Question, erro
 		switch k {
 		case "whoTop":
 			q, err = g.genWhoTop(ctx, chatID)
-		case "whoFirst":
-			q, err = g.genWhoFirst(ctx, chatID)
 		case "stat":
 			q, err = g.genStat(ctx, chatID)
 		case "mentioned":
@@ -75,26 +85,6 @@ func (g *Generator) genWhoTop(ctx context.Context, chatID int64) (*Question, err
 			continue
 		}
 		return newQuestion("whoTop", fmt.Sprintf("Кто чаще всех говорил в чате про «%s»?", t), opts, 0), nil
-	}
-	return nil, errNoData
-}
-
-// genWhoFirst — «Кто первым заговорил про X?» (минимальный ts упоминания).
-func (g *Generator) genWhoFirst(ctx context.Context, chatID int64) (*Question, error) {
-	for _, t := range shuffledTerms() {
-		rows, err := g.msgs.FirstByKeyword(ctx, chatID, t, 5)
-		if err != nil || len(rows) < 4 {
-			continue
-		}
-		names := make([]string, 0, len(rows))
-		for _, r := range rows {
-			names = append(names, r.Username)
-		}
-		opts := topDistinct(names, 4)
-		if len(opts) < 4 {
-			continue
-		}
-		return newQuestion("whoFirst", fmt.Sprintf("Кто первым заговорил в чате про «%s»?", t), opts, 0), nil
 	}
 	return nil, errNoData
 }

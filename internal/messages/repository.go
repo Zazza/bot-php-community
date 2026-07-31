@@ -322,41 +322,6 @@ func (r *Repository) UserStats(ctx context.Context, chatID, userID int64) (*User
 	return s, nil
 }
 
-// FirstMention — автор и время его первого упоминания темы.
-type FirstMention struct {
-	UserID   int64     `db:"user_id"`
-	Username string    `db:"username"`
-	FirstTS  time.Time `db:"first_ts"`
-}
-
-// FirstByKeyword — авторы, упоминавшие тему, упорядоченные по времени ПЕРВОГО упоминания
-// (кто первым заговорил). Клон ExpertByKeyword, но MIN(ts) вместо count(*).
-func (r *Repository) FirstByKeyword(ctx context.Context, chatID int64, topic string, limit int) ([]FirstMention, error) {
-	normalized := normalizeTopic(topic)
-	if len(normalized) < 2 {
-		return nil, nil
-	}
-	if limit <= 0 {
-		limit = 5
-	}
-	var rows []FirstMention
-	if err := r.db.SelectContext(ctx, &rows, `
-		SELECT m.user_id,
-		       COALESCE(NULLIF(MAX(u.username),''), NULLIF(MAX(m.username),''), 'user') AS username,
-		       MIN(m.ts) AS first_ts
-		FROM messages m
-		LEFT JOIN users u ON u.tg_user_id = m.user_id
-		WHERE m.chat_id = $1 AND m.user_id <> 0
-		  AND regexp_replace(lower(m.text), '[^0-9a-zа-яё]', '', 'g') ILIKE $2
-		GROUP BY m.user_id
-		ORDER BY first_ts ASC
-		LIMIT $3
-	`, chatID, "%"+normalized+"%", limit); err != nil {
-		return nil, fmt.Errorf("first by keyword: %w", err)
-	}
-	return rows, nil
-}
-
 // MentionCount — число сообщений чата, упоминающих тему (keyword). Источник правды для
 // вопроса викторины «правда ли упоминали X».
 func (r *Repository) MentionCount(ctx context.Context, chatID int64, topic string) (int, error) {
