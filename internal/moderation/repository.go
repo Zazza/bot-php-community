@@ -80,6 +80,7 @@ type GateRecord struct {
 	TGUserID         int64      `db:"tg_user_id"`
 	Username         string     `db:"username"`
 	CaptchaMessageID int64      `db:"captcha_message_id"`
+	ServiceMessageID int64      `db:"service_message_id"`
 	CorrectOption    int        `db:"correct_option"`
 	Attempts         int        `db:"attempts"`
 	State            string     `db:"state"` // pending | solved | kicked | cancelled
@@ -89,7 +90,7 @@ type GateRecord struct {
 	ReleasedAt       *time.Time `db:"released_at"`
 }
 
-const gateCols = `id, chat_id, tg_user_id, username, captcha_message_id, correct_option,
+const gateCols = `id, chat_id, tg_user_id, username, captcha_message_id, service_message_id, correct_option,
 	attempts, state, joined_at, deadline, probation_until, released_at`
 
 // CreateGate создаёт запись гейта, возвращает id для привязки кнопок.
@@ -110,6 +111,16 @@ func (r *Repository) SetCaptchaMessage(ctx context.Context, id, messageID int64)
 	if _, err := r.db.ExecContext(ctx,
 		`UPDATE newcomer_gates SET captcha_message_id = $2 WHERE id = $1`, id, messageID); err != nil {
 		return fmt.Errorf("set captcha message: %w", err)
+	}
+	return nil
+}
+
+// SetServiceMessage привязывает id service-сообщения «теперь в группе», чтобы удалить
+// его при кике/уходе новичка (не оставлять след входа в чате).
+func (r *Repository) SetServiceMessage(ctx context.Context, id, messageID int64) error {
+	if _, err := r.db.ExecContext(ctx,
+		`UPDATE newcomer_gates SET service_message_id = $2 WHERE id = $1`, id, messageID); err != nil {
+		return fmt.Errorf("set service message: %w", err)
 	}
 	return nil
 }

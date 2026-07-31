@@ -115,7 +115,7 @@ func (h *Handlers) OnMessage(ctx context.Context, b *bot.Bot, upd *models.Update
 			if u.IsBot {
 				continue
 			}
-			h.moderation.OnNewMember(ctx, chatID, u.ID, u.Username)
+			h.moderation.OnNewMember(ctx, chatID, u.ID, u.Username, int64(msg.ID))
 		}
 		return
 	}

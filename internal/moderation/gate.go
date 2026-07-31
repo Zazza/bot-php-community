@@ -18,7 +18,9 @@ import (
 )
 
 // OnNewMember — гейт новичка: мьют + капча (математика, inline-кнопки).
-func (f *Flow) OnNewMember(ctx context.Context, chatID, userID int64, username string) {
+// serviceMessageID — id service-сообщения «теперь в группе» (new_chat_members),
+// чтобы удалить его при кике/уходе новичка (0, если такого сообщения не было).
+func (f *Flow) OnNewMember(ctx context.Context, chatID, userID int64, username string, serviceMessageID int64) {
 	if !f.gateEnabled {
 		_, _ = f.users.Upsert(ctx, &users.User{TGUserID: userID, Username: username, Status: "member"})
 		return
@@ -38,6 +40,9 @@ func (f *Flow) OnNewMember(ctx context.Context, chatID, userID int64, username s
 	if err != nil {
 		slog.Error("gate create", "err", err)
 		return
+	}
+	if serviceMessageID != 0 {
+		_ = f.repo.SetServiceMessage(ctx, gateID, serviceMessageID)
 	}
 	text := fmt.Sprintf("Привет, %s! 👋 Подтверди, что не бот — сколько будет %s?", display, expr)
 	sent, err := f.api.SendMessage(ctx, &bot.SendMessageParams{
@@ -97,7 +102,7 @@ func (f *Flow) HandleGateCallback(ctx context.Context, cb *models.CallbackQuery)
 		_ = f.kickUser(ctx, g.ChatID, g.TGUserID)
 		_ = f.repo.SetGateKicked(ctx, gateID)
 		_ = f.users.SetStatus(ctx, g.TGUserID, "banned")
-		f.deleteCaptchaMessage(ctx, g.ChatID, g.CaptchaMessageID)
+		f.deleteCaptchaAndService(ctx, g.ChatID, g.CaptchaMessageID, g.ServiceMessageID)
 		return "❌ Неверно, лимит попыток исчерпан — пока!"
 	}
 	return "❌ Неверно, попробуй ещё"
@@ -109,7 +114,7 @@ func (f *Flow) OnLeftMember(ctx context.Context, chatID, userID int64) {
 	if err != nil || g == nil {
 		return
 	}
-	f.deleteCaptchaMessage(ctx, chatID, g.CaptchaMessageID)
+	f.deleteCaptchaAndService(ctx, chatID, g.CaptchaMessageID, g.ServiceMessageID)
 	_ = f.repo.SetGateCancelled(ctx, g.ID)
 	slog.Info("gate cleanup on leave", "user", userID)
 }
@@ -147,7 +152,7 @@ func (f *Flow) sweep(ctx context.Context) {
 	if due, err := f.repo.PendingDue(ctx, now); err == nil {
 		for _, g := range due {
 			_ = f.kickUser(ctx, g.ChatID, g.TGUserID)
-			f.deleteCaptchaMessage(ctx, g.ChatID, g.CaptchaMessageID)
+			f.deleteCaptchaAndService(ctx, g.ChatID, g.CaptchaMessageID, g.ServiceMessageID)
 			_ = f.repo.SetGateKicked(ctx, g.ID)
 			_ = f.users.SetStatus(ctx, g.TGUserID, "banned")
 			slog.Info("gate timeout kick", "user", g.TGUserID)
@@ -157,7 +162,7 @@ func (f *Flow) sweep(ctx context.Context) {
 	if pending, err := f.repo.PendingNotDue(ctx, now); err == nil {
 		for _, g := range pending {
 			if f.userGone(ctx, g.ChatID, g.TGUserID) {
-				f.deleteCaptchaMessage(ctx, g.ChatID, g.CaptchaMessageID)
+				f.deleteCaptchaAndService(ctx, g.ChatID, g.CaptchaMessageID, g.ServiceMessageID)
 				_ = f.repo.SetGateCancelled(ctx, g.ID)
 				slog.Info("gate cleanup: user gone", "user", g.TGUserID)
 			}
@@ -187,8 +192,11 @@ func (f *Flow) unmuteFull(ctx context.Context, chatID, userID int64) error {
 	return unmuteUserFull(ctx, f.api, chatID, userID)
 }
 
-func (f *Flow) deleteCaptchaMessage(ctx context.Context, chatID, messageID int64) {
-	deleteChatMessage(ctx, f.api, chatID, messageID)
+// deleteCaptchaAndService удаляет сообщение капчи и service-сообщение «теперь в группе»
+// (чтобы при кике/уходе новичка в чате не оставалось следов входа).
+func (f *Flow) deleteCaptchaAndService(ctx context.Context, chatID, captchaMsgID, serviceMsgID int64) {
+	deleteChatMessage(ctx, f.api, chatID, captchaMsgID)
+	deleteChatMessage(ctx, f.api, chatID, serviceMsgID)
 }
 
 // editAndClear правит текст капчи и убирает кнопки.
