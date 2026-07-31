@@ -97,11 +97,15 @@ func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery)
 		return "Ты уже отвечал 🙂"
 	}
 
+	letters := "ABCD"
+	opts := row.Opts()
+	picked := strings.TrimSpace(opts[choice])
+	right := strings.TrimSpace(opts[row.Correct])
 	var toast string
 	if choice == row.Correct {
-		toast = "✅ Верно!"
+		toast = fmt.Sprintf("Ты выбрал %c) %s — ✅ Верно!", letters[choice], picked)
 	} else {
-		toast = fmt.Sprintf("❌ Нет. Правильно: %c", "ABCD"[row.Correct])
+		toast = fmt.Sprintf("Ты выбрал %c) %s — ❌. Правильно: %c) %s", letters[choice], picked, letters[row.Correct], right)
 	}
 
 	// live-tally: обновим сообщение (кнопки оставляем — отвечает каждый по разу).
