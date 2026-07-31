@@ -60,8 +60,8 @@ func main() {
 	}
 	defer dbx.Close()
 
-	llmClient := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModel, 2048)     // умная: модерация-судья + анти-спам (safety/решения)
-	llmCheap := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModelCheap, 2048) // дешёвая: ответы/faq/digest/темы
+	llmClient := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModel, 2048, 0)     // умная: ответы /ask + модерация-судья + анти-спам (temp=0: детерминированно)
+	llmCheap := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModelCheap, 2048, 0) // дешёвая: faq/digest/темы
 	embedder := llm.NewEmbedder(cfg.LLMURL, cfg.LLMAPIKey, cfg.EmbedModel)
 
 	msgRepo := messages.New(dbx)

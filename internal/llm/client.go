@@ -22,24 +22,29 @@ type Message struct {
 
 // LLMClient — chat-completions клиент. Без стриминга: TG принимает одним сообщением.
 type LLMClient struct {
-	baseURL   string
-	apiKey    string
-	model     string
-	maxTokens int
-	client    *http.Client
+	baseURL     string
+	apiKey      string
+	model       string
+	maxTokens   int
+	temperature float64
+	client      *http.Client
 }
 
-// NewLLMClient создаёт chat-клиент.
-func NewLLMClient(baseURL, apiKey, model string, maxTokens int) *LLMClient {
+// NewLLMClient создаёт chat-клиент. temperature задаёт «температуру» сэмплинга:
+// 0 — жадное (детерминированное) декодирование, одинаковый ввод → одинаковый вывод.
+// Без явного temperature API берёт дефолт модели (~1.0), и ответы начинают плавать
+// (один и тот же вопрос в ЛС и в чате давал разные вердикты SKIP/ответ).
+func NewLLMClient(baseURL, apiKey, model string, maxTokens int, temperature float64) *LLMClient {
 	if maxTokens <= 0 {
 		maxTokens = 2048
 	}
 	return &LLMClient{
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		apiKey:    apiKey,
-		model:     model,
-		maxTokens: maxTokens,
-		client:    &http.Client{Timeout: 90 * time.Second},
+		baseURL:     strings.TrimRight(baseURL, "/"),
+		apiKey:      apiKey,
+		model:       model,
+		maxTokens:   maxTokens,
+		temperature: temperature,
+		client:      &http.Client{Timeout: 90 * time.Second},
 	}
 }
 
@@ -47,9 +52,10 @@ func NewLLMClient(baseURL, apiKey, model string, maxTokens int) *LLMClient {
 func (c *LLMClient) Model() string { return c.model }
 
 type chatRequest struct {
-	Model     string    `json:"model"`
-	Messages  []Message `json:"messages"`
-	MaxTokens int       `json:"max_tokens"`
+	Model       string    `json:"model"`
+	Messages    []Message `json:"messages"`
+	MaxTokens   int       `json:"max_tokens"`
+	Temperature float64   `json:"temperature"`
 }
 
 type chatResponse struct {
@@ -66,9 +72,10 @@ type chatResponse struct {
 // Chat выполняет синхронный (не стриминговый) запрос и возвращает текст ассистента.
 func (c *LLMClient) Chat(ctx context.Context, messages []Message) (string, int, int, error) {
 	body, err := json.Marshal(chatRequest{
-		Model:     c.model,
-		Messages:  messages,
-		MaxTokens: c.maxTokens,
+		Model:       c.model,
+		Messages:    messages,
+		MaxTokens:   c.maxTokens,
+		Temperature: c.temperature,
 	})
 	if err != nil {
 		return "", 0, 0, fmt.Errorf("marshal request: %w", err)
