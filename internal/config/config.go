@@ -21,8 +21,6 @@ type Config struct {
 	LLMModelCheap      string
 	EmbedModel         string
 	EmbedDim           int
-	QuietThreshold     int
-	TopicCron          string
 	NewcomerTimeout    time.Duration
 	LogPath            string
 	SearXNGURL         string
@@ -58,8 +56,6 @@ func Load() (*Config, error) {
 		LLMModelCheap:      envOr("PHPBOT_LLM_MODEL_CHEAP", "openai/gpt-4o-mini"),
 		EmbedModel:         envOr("PHPBOT_EMBED_MODEL", "text-embedding-3-small"),
 		EmbedDim:           envInt("PHPBOT_EMBED_DIM", 1536),
-		QuietThreshold:     envInt("PHPBOT_QUIET_THRESHOLD", 20),
-		TopicCron:          envOr("PHPBOT_TOPIC_CRON", "0 12,20 * * *"),
 		NewcomerTimeout:    envDur("PHPBOT_NEWCOMER_TIMEOUT", 5*time.Minute),
 		LogPath:            os.Getenv("PHPBOT_LOG_PATH"),
 		SearXNGURL:         envOr("PHPBOT_SEARXNG_URL", ""),

@@ -29,7 +29,6 @@ func Get(name string, args ...any) string {
 const (
 	Judge   = "judge.txt"
 	Chat    = "chat.txt"
-	Topic   = "topic.txt"
 	Digest  = "digest.txt"
 	Safety  = "safety.txt"
 	Spam    = "spam.txt"

@@ -122,7 +122,6 @@ func main() {
 		defer voteKick.Stop()
 	}
 
-	topicsSched := topics.New(dbx, llmCheap, msgRepo, poster, cfg.ChatIDs, cfg.QuietThreshold)
 	digester := topics.NewDigester(dbx, llmCheap, msgRepo, poster, cfg.ChatIDs)
 
 	quizRepo := quiz.NewRepository(dbx)
@@ -134,7 +133,7 @@ func main() {
 		API: b, ChatIDs: cfg.ChatIDs, BotUserID: me.ID,
 		Moderation: moderFlow, Spam: spamFilter, Vote: voteKick,
 		Users: userRepo, Msgs: msgRepo, Vec: vecRepo,
-		Answerer: answerer, Topics: topicsSched, Digester: digester,
+		Answerer: answerer, Digester: digester,
 		FAQ: faqRepo, FAQBuilder: faqBuilder, Quiz: quizSvc,
 	})
 	handlers.SetBotUsername(me.Username)
@@ -142,9 +141,6 @@ func main() {
 	router := tg.New(b, handlers)
 
 	// Cron-шедулеры.
-	if err := topicsSched.Start(ctx, cfg.TopicCron); err != nil {
-		slog.Error("topics cron start", "err", err)
-	}
 	if err := digester.Start(ctx, "0 9 * * 1"); err != nil {
 		slog.Error("digest cron start", "err", err)
 	}
@@ -163,7 +159,6 @@ func main() {
 		}
 		defer annivSched.Stop()
 	}
-	defer topicsSched.Stop()
 	defer digester.Stop()
 	defer faqBuilder.Stop()
 

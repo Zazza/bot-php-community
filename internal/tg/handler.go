@@ -51,7 +51,6 @@ type Handlers struct {
 	msgs       *messages.Repository
 	vec        *messages.VectorRepo
 	answerer   *chat.Answerer
-	topics     *topics.Scheduler
 	digester   *topics.Digester
 	faq        *faq.Repo
 	faqBuilder *faq.Builder
@@ -70,7 +69,6 @@ type HandlersDeps struct {
 	Msgs       *messages.Repository
 	Vec        *messages.VectorRepo
 	Answerer   *chat.Answerer
-	Topics     *topics.Scheduler
 	Digester   *topics.Digester
 	FAQ        *faq.Repo
 	FAQBuilder *faq.Builder
@@ -89,7 +87,6 @@ func NewHandlers(d HandlersDeps) *Handlers {
 		msgs:       d.Msgs,
 		vec:        d.Vec,
 		answerer:   d.Answerer,
-		topics:     d.Topics,
 		digester:   d.Digester,
 		faq:        d.FAQ,
 		faqBuilder: d.FAQBuilder,
@@ -263,8 +260,6 @@ func (h *Handlers) dispatchCommand(ctx context.Context, replyChatID, dataChatID 
 		h.cmdHelp(ctx, replyChatID)
 	case "stats":
 		h.cmdStats(ctx, replyChatID, dataChatID, args)
-	case "topic":
-		h.cmdTopic(ctx, replyChatID, dataChatID, msg, args)
 	case "digest":
 		h.cmdDigest(ctx, replyChatID, dataChatID, msg, args)
 	case "check":
@@ -300,7 +295,6 @@ func (h *Handlers) cmdHelp(ctx context.Context, replyChatID int64) {
 /help — этот текст
 
 *Только для админов:*
-/topic now — сгенерировать и запостить тему
 /digest [период] — дайджест (week, month, 2025-06)
 /check @user — ручная judge-проверка последних сообщений
 /about @user [период] — краткий портрет участника по его сообщениям
@@ -637,21 +631,6 @@ func memberUsername(cm *models.ChatMember) string {
 		return u.Username
 	}
 	return ""
-}
-
-func (h *Handlers) cmdTopic(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, args string) {
-	if !h.moderation.IsAdmin(msg.From.ID) {
-		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
-		return
-	}
-	if strings.TrimSpace(args) != "now" {
-		_ = SendMessage(ctx, h.api, replyChatID, "Использование: /topic now")
-		return
-	}
-	// PostNow сам постит тему через Scheduler.post() в postChatID — повторно не отправляем.
-	if _, err := h.topics.PostNow(ctx, dataChatID, replyChatID); err != nil {
-		_ = SendMessage(ctx, h.api, replyChatID, "Не удалось сгенерировать тему: "+err.Error())
-	}
 }
 
 func (h *Handlers) cmdDigest(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, args string) {

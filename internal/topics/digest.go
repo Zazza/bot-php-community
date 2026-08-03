@@ -1,3 +1,4 @@
+// Package topics — еженедельный дайджест чата (суммаризация сообщений за период через LLM).
 package topics
 
 import (
@@ -14,6 +15,11 @@ import (
 	"phpbot/internal/messages"
 	"phpbot/internal/prompts"
 )
+
+// Poster — минимальный интерфейс для постинга в чат (реализует обёртка tg).
+type Poster interface {
+	PostMessage(ctx context.Context, chatID int64, text string) error
+}
 
 // ErrTooFewMessages — дайджест не строится: за период слишком мало сообщений.
 // Cron трактует как не-ошибку (debug), ручная команда /digest — сообщает пользователю.
