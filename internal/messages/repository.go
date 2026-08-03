@@ -97,6 +97,27 @@ func (r *Repository) CountSince(ctx context.Context, chatID int64, since time.Ti
 	return n, nil
 }
 
+// CountByUser возвращает число сообщений участника в чате (не больше limit — capped-count,
+// чтобы для ветерана с тысячами сообщений скан ограничивался limit строками). limit<=0 — без
+// лимита. Источник at-risk-порога анти-спама: мало сообщений → полная LLM-классификация.
+func (r *Repository) CountByUser(ctx context.Context, chatID, userID int64, limit int) (int, error) {
+	var n int
+	if limit > 0 {
+		if err := r.db.GetContext(ctx, &n, `
+			SELECT count(*) FROM (SELECT 1 FROM messages WHERE chat_id = $1 AND user_id = $2 LIMIT $3) t
+		`, chatID, userID, limit); err != nil {
+			return 0, fmt.Errorf("count by user: %w", err)
+		}
+		return n, nil
+	}
+	if err := r.db.GetContext(ctx, &n, `
+		SELECT count(*) FROM messages WHERE chat_id = $1 AND user_id = $2
+	`, chatID, userID); err != nil {
+		return 0, fmt.Errorf("count by user: %w", err)
+	}
+	return n, nil
+}
+
 // Since возвращает все сообщения чата за период (хронологически).
 func (r *Repository) Since(ctx context.Context, chatID int64, from, to time.Time) ([]Message, error) {
 	var rows []Message

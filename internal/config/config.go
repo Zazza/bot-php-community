@@ -37,6 +37,7 @@ type Config struct {
 	SpamWarnMax        int
 	SpamWarnPeriod     time.Duration
 	SpamRestrictHours  time.Duration
+	SpamNewbieMsgs     int
 	VoteEnabled        bool
 	VoteWindow         time.Duration
 	VoteQuorum         int
@@ -73,6 +74,7 @@ func Load() (*Config, error) {
 		SpamWarnMax:        envInt("PHPBOT_SPAM_WARN_MAX", 3),
 		SpamWarnPeriod:     envDur("PHPBOT_SPAM_WARN_PERIOD", 24*time.Hour),
 		SpamRestrictHours:  time.Duration(envInt("PHPBOT_SPAM_RESTRICT_HOURS", 6)) * time.Hour,
+		SpamNewbieMsgs:     envInt("PHPBOT_SPAM_NEWBIE_MSGS", 8),
 		VoteEnabled:        envBool("PHPBOT_VOTE_ENABLED", true),
 		VoteWindow:         envDur("PHPBOT_VOTE_WINDOW", 15*time.Minute),
 		VoteQuorum:         envInt("PHPBOT_VOTE_QUORUM", 3),
@@ -89,6 +91,9 @@ func Load() (*Config, error) {
 	}
 	if c.SpamWarnMax < 1 {
 		c.SpamWarnMax = 1
+	}
+	if c.SpamNewbieMsgs < 0 {
+		c.SpamNewbieMsgs = 0
 	}
 	if c.VoteQuorum < 1 {
 		c.VoteQuorum = 1

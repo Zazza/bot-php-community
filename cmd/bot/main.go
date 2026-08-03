@@ -104,9 +104,10 @@ func main() {
 	moderFlow.Start(ctx)
 	defer moderFlow.Stop()
 
-	spamFilter := moderation.NewSpamFilter(b, llmClient, moderRepo, cfg.AdminIDs, me.ID, moderation.SpamConfig{
+	spamFilter := moderation.NewSpamFilter(b, llmClient, moderRepo, msgRepo, cfg.AdminIDs, me.ID, moderation.SpamConfig{
 		FloodMsgs: cfg.SpamFloodMsgs, FloodWindow: cfg.SpamFloodWindow,
 		WarnMax: cfg.SpamWarnMax, WarnPeriod: cfg.SpamWarnPeriod, RestrictHours: cfg.SpamRestrictHours,
+		NewbieMsgs: cfg.SpamNewbieMsgs,
 	})
 	if cfg.SpamEnabled {
 		spamFilter.Start(ctx)

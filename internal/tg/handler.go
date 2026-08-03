@@ -181,33 +181,21 @@ func (h *Handlers) OnMessage(ctx context.Context, b *bot.Bot, upd *models.Update
 
 	// 3. Сохраняем любое текстовое сообщение в историю + async embedding.
 	if text != "" && msg.From != nil {
-		// 3a. Анти-спам: синхронная эвристика → при подозрении LLM-классификация в горутине.
-		// Не фильтруем бота, админов и не блокируем update-цикл.
+		// 3a. Анти-спам. Не фильтруем бота и админов; не блокируем update-цикл (LLM — в горутине).
 		if h.spam != nil && msg.From.ID != h.botUserID && !h.moderation.IsAdmin(msg.From.ID) {
 			in := moderation.SpamInput{
 				ChatID: chatID, UserID: msg.From.ID, Username: msg.From.Username,
 				MessageID: int64(msg.ID), Text: text,
 			}
+			// Жёсткая эвристика → классификация/удаление (hard-сигналы — без LLM).
 			if hit, reason := h.spam.Heuristic(in); hit {
-				go func(in moderation.SpamInput, reason string) {
-					defer func() {
-						if r := recover(); r != nil {
-							slog.Error("spam worker panic", "err", r, "stack", string(debug.Stack()))
-						}
-					}()
-					classCtx, classCancel := context.WithTimeout(context.Background(), spamClassifyTimeout)
-					defer classCancel()
-					if h.spam.ClassifyAndEnforce(classCtx, in, reason) {
-						return
-					}
-					// Свежий бюджет на сохранение/ответ — независимо от времени LLM.
-					saveCtx, saveCancel := context.WithTimeout(context.Background(), spamSaveTimeout)
-					defer saveCancel()
-					h.saveMessage(saveCtx, msg, in.Text)
-					if h.isAddressedToBot(msg, in.Text) {
-						h.answerChat(saveCtx, chatID, chatID, msg, stripBotMention(in.Text, h.botUserID))
-					}
-				}(in, reason)
+				h.classifyInBackground(in, reason, msg, chatID)
+				return
+			}
+			// Малоактивный/новый автор → полная LLM-классификация даже без сигнала эвристики
+			// (ловит семантический текст-скам без ссылок/@/CAPS, который иначе проскакивает).
+			if h.spam.IsAtRisk(ctx, in) {
+				h.classifyInBackground(in, "review", msg, chatID)
 				return
 			}
 		}
@@ -1085,6 +1073,31 @@ func (h *Handlers) pmAnswer(ctx context.Context, msg *models.Message) {
 		}
 		if resp != "" { // пустой ответ (SKIP/не нашёл) — промолчим
 			_ = SendMessage(ctxBg, h.api, msg.Chat.ID, resp)
+		}
+	}()
+}
+
+// classifyInBackground запускает LLM-классификацию/удаление спама в горутине, чтобы не
+// блокировать update-цикл. Признано спамом → удалено, в историю не сохраняется; иначе —
+// сохраняется (+ ответ, если адресовано боту). reason="review" — мягкий (не hard) → через LLM.
+func (h *Handlers) classifyInBackground(in moderation.SpamInput, reason string, msg *models.Message, chatID int64) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("spam worker panic", "err", r, "stack", string(debug.Stack()))
+			}
+		}()
+		classCtx, classCancel := context.WithTimeout(context.Background(), spamClassifyTimeout)
+		defer classCancel()
+		if h.spam.ClassifyAndEnforce(classCtx, in, reason) {
+			return
+		}
+		// Свежий бюджет на сохранение/ответ — независимо от времени LLM.
+		saveCtx, saveCancel := context.WithTimeout(context.Background(), spamSaveTimeout)
+		defer saveCancel()
+		h.saveMessage(saveCtx, msg, in.Text)
+		if h.isAddressedToBot(msg, in.Text) {
+			h.answerChat(saveCtx, chatID, chatID, msg, stripBotMention(in.Text, h.botUserID))
 		}
 	}()
 }

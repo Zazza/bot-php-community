@@ -22,6 +22,7 @@ type SpamConfig struct {
 	WarnMax       int
 	WarnPeriod    time.Duration
 	RestrictHours time.Duration
+	NewbieMsgs    int
 }
 
 type SpamInput struct {
@@ -38,10 +39,17 @@ type userBucket struct {
 	last  string
 }
 
+// messageCounter — число сообщений участника в чате (messages.Repository удовлетворяет).
+// Нужен для at-risk-проверки: малая история → полная LLM-классификация сообщения.
+type messageCounter interface {
+	CountByUser(ctx context.Context, chatID, userID int64, limit int) (int, error)
+}
+
 type SpamFilter struct {
 	api       *bot.Bot
 	llm       *llm.LLMClient
 	repo      *Repository
+	counter   messageCounter
 	adminIDs  map[int64]struct{}
 	botUserID int64
 	cfg       SpamConfig
@@ -53,7 +61,7 @@ type SpamFilter struct {
 	wg   sync.WaitGroup
 }
 
-func NewSpamFilter(api *bot.Bot, llmClient *llm.LLMClient, repo *Repository, adminIDs []int64, botUserID int64, cfg SpamConfig) *SpamFilter {
+func NewSpamFilter(api *bot.Bot, llmClient *llm.LLMClient, repo *Repository, counter messageCounter, adminIDs []int64, botUserID int64, cfg SpamConfig) *SpamFilter {
 	amap := make(map[int64]struct{}, len(adminIDs))
 	for _, id := range adminIDs {
 		amap[id] = struct{}{}
@@ -62,12 +70,30 @@ func NewSpamFilter(api *bot.Bot, llmClient *llm.LLMClient, repo *Repository, adm
 		api:       api,
 		llm:       llmClient,
 		repo:      repo,
+		counter:   counter,
 		adminIDs:  amap,
 		botUserID: botUserID,
 		cfg:       cfg,
 		recent:    make(map[int64]*userBucket),
 		stop:      make(chan struct{}),
 	}
+}
+
+// IsAtRisk — нужно ли прогонять сообщение через LLM-классификатор даже без срабатывания
+// эвристики. True для малоактивных/новых аккаунтов (число сообщений в чате < NewbieMsgs):
+// иначе семантический текст-скам без ссылок/@/CAPS проскакивает мимо жёстких сигналов.
+// NewbieMsgs<=0 — kill-switch (at-risk выключен). Fail-safe: ошибка/отсутствие счётчика →
+// false (не блокируем — сообщение сохраняется как обычно).
+func (f *SpamFilter) IsAtRisk(ctx context.Context, in SpamInput) bool {
+	if f.counter == nil || f.cfg.NewbieMsgs <= 0 {
+		return false
+	}
+	n, err := f.counter.CountByUser(ctx, in.ChatID, in.UserID, f.cfg.NewbieMsgs)
+	if err != nil {
+		slog.Warn("spam at-risk count", "err", err)
+		return false
+	}
+	return n < f.cfg.NewbieMsgs
 }
 
 func (f *SpamFilter) bucket(userID int64) *userBucket {

@@ -1,6 +1,8 @@
 package moderation
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +26,7 @@ func TestHeuristic(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			f := NewSpamFilter(nil, nil, nil, nil, 0, SpamConfig{
+			f := NewSpamFilter(nil, nil, nil, nil, nil, 0, SpamConfig{
 				FloodMsgs:   10,
 				FloodWindow: time.Minute,
 			})
@@ -39,7 +41,7 @@ func TestHeuristic(t *testing.T) {
 // TestHeuristicRepeat — повтор подряд одного и того же сообщения → hit.
 // Stateful: bucket хранит последнее сообщение пользователя.
 func TestHeuristicRepeat(t *testing.T) {
-	f := NewSpamFilter(nil, nil, nil, nil, 0, SpamConfig{
+	f := NewSpamFilter(nil, nil, nil, nil, nil, 0, SpamConfig{
 		FloodMsgs:   10,
 		FloodWindow: time.Minute,
 	})
@@ -60,7 +62,7 @@ func TestHeuristicRepeat(t *testing.T) {
 // TestHeuristicFlood — FloodMsgs-е сообщение в окне FloodWindow → hit "флуд".
 // Stateful: используем разные тексты, чтобы не сработала эвристика повтора.
 func TestHeuristicFlood(t *testing.T) {
-	f := NewSpamFilter(nil, nil, nil, nil, 0, SpamConfig{
+	f := NewSpamFilter(nil, nil, nil, nil, nil, 0, SpamConfig{
 		FloodMsgs:   3,
 		FloodWindow: time.Minute,
 	})
@@ -129,5 +131,73 @@ func TestSanitizeReason(t *testing.T) {
 	}
 	if got := sanitizeReason("реклама крипты"); got != "реклама крипты" {
 		t.Errorf("sanitizeReason без ссылок изменил текст: %q", got)
+	}
+}
+
+// fakeCounter — тестовый messageCounter для IsAtRisk.
+type fakeCounter struct {
+	n   int
+	err error
+}
+
+func (f fakeCounter) CountByUser(_ context.Context, _, _ int64, _ int) (int, error) {
+	return f.n, f.err
+}
+
+// TestIsAtRisk — at-risk = число сообщений в чате < NewbieMsgs. Ловит новые/малоактивные
+// аккаунты; ветераны (count >= порога) пропускаются. Это и закрывает прод-баг: текст-скам
+// от только что зашедшего аккаунта (count=0) пойдёт в LLM-классификатор, а не проскочит.
+func TestIsAtRisk(t *testing.T) {
+	cases := []struct {
+		name       string
+		count      int
+		newbieMsgs int
+		want       bool
+	}{
+		{"brand-new 0 msgs", 0, 8, true},
+		{"below threshold", 7, 8, true},
+		{"at threshold", 8, 8, false},
+		{"veteran", 810, 8, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := NewSpamFilter(nil, nil, nil, fakeCounter{n: c.count}, nil, 0, SpamConfig{NewbieMsgs: c.newbieMsgs})
+			got := f.IsAtRisk(context.Background(), SpamInput{ChatID: 1, UserID: 1})
+			if got != c.want {
+				t.Errorf("IsAtRisk(count=%d, newbie=%d) = %v, want %v", c.count, c.newbieMsgs, got, c.want)
+			}
+		})
+	}
+}
+
+// TestIsAtRiskFailSafe — ошибка счётчика → false (не блокируем: сообщение сохраняется как обычно).
+func TestIsAtRiskFailSafe(t *testing.T) {
+	f := NewSpamFilter(nil, nil, nil, fakeCounter{err: errors.New("db down")}, nil, 0, SpamConfig{NewbieMsgs: 8})
+	if f.IsAtRisk(context.Background(), SpamInput{ChatID: 1, UserID: 1}) {
+		t.Fatal("IsAtRisk on counter error = true, want false (fail-safe)")
+	}
+}
+
+// TestIsAtRiskNoCounter — без счётчика (nil) at-risk выключен.
+func TestIsAtRiskNoCounter(t *testing.T) {
+	f := NewSpamFilter(nil, nil, nil, nil, nil, 0, SpamConfig{NewbieMsgs: 8})
+	if f.IsAtRisk(context.Background(), SpamInput{ChatID: 1, UserID: 1}) {
+		t.Fatal("IsAtRisk with nil counter = true, want false")
+	}
+}
+
+// TestIsAtRiskDisabled — NewbieMsgs<=0 — kill-switch: at-risk выключен даже для 0 сообщений.
+func TestIsAtRiskDisabled(t *testing.T) {
+	f := NewSpamFilter(nil, nil, nil, fakeCounter{n: 0}, nil, 0, SpamConfig{NewbieMsgs: 0})
+	if f.IsAtRisk(context.Background(), SpamInput{ChatID: 1, UserID: 1}) {
+		t.Fatal("IsAtRisk with NewbieMsgs=0 = true, want false (kill-switch)")
+	}
+}
+
+// TestReviewNotHard — reason "review" (at-risk, без сигнала эвристики) не hard → пойдёт через
+// LLM, а не авторитарный enforce без классификатора.
+func TestReviewNotHard(t *testing.T) {
+	if isHardReason("review") {
+		t.Fatal(`isHardReason("review") = true, want false (at-risk must go through LLM)`)
 	}
 }
