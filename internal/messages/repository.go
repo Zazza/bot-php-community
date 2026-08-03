@@ -423,9 +423,9 @@ func (r *Repository) Anniversaries(ctx context.Context, chatID int64, now time.T
 		LEFT JOIN users u ON u.tg_user_id = m.user_id
 		WHERE m.chat_id = $1 AND m.user_id <> 0
 		GROUP BY m.user_id
-		HAVING EXTRACT(MONTH FROM MIN(m.ts)) = EXTRACT(MONTH FROM $2)
-		   AND EXTRACT(DAY   FROM MIN(m.ts)) = EXTRACT(DAY   FROM $2)
-		   AND EXTRACT(YEAR  FROM MIN(m.ts)) <> EXTRACT(YEAR FROM $2)
+		HAVING EXTRACT(MONTH FROM MIN(m.ts)) = EXTRACT(MONTH FROM $2::date)
+		   AND EXTRACT(DAY   FROM MIN(m.ts)) = EXTRACT(DAY   FROM $2::date)
+		   AND EXTRACT(YEAR  FROM MIN(m.ts)) <> EXTRACT(YEAR FROM $2::date)
 	`, chatID, now); err != nil {
 		return nil, fmt.Errorf("anniversaries: %w", err)
 	}
