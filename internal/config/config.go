@@ -43,6 +43,8 @@ type Config struct {
 	AnniversaryEnabled bool
 	QuizCheckCron      string
 	QuizEnabled        bool
+	NewsCron           string
+	NewsEnabled        bool
 }
 
 // Load читает env. Необходимые переменные — фаталят при отсутствии.
@@ -78,6 +80,8 @@ func Load() (*Config, error) {
 		AnniversaryEnabled: envBool("PHPBOT_ANNIVERSARY_ENABLED", true),
 		QuizCheckCron:      envOr("PHPBOT_QUIZ_CHECK_CRON", "*/15 * * * *"),
 		QuizEnabled:        envBool("PHPBOT_QUIZ_ENABLED", true),
+		NewsCron:           envOr("PHPBOT_NEWS_CRON", "0 8 * * 1"),
+		NewsEnabled:        envBool("PHPBOT_NEWS_ENABLED", true),
 	}
 	c.AdminIDs = envInt64List("PHPBOT_ADMIN_IDS")
 	c.ChatIDs = envInt64List("PHPBOT_CHAT_ID")

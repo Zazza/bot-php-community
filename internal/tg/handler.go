@@ -16,6 +16,7 @@ import (
 	"phpbot/internal/faq"
 	"phpbot/internal/messages"
 	"phpbot/internal/moderation"
+	"phpbot/internal/news"
 	"phpbot/internal/quiz"
 	"phpbot/internal/topics"
 	"phpbot/internal/users"
@@ -55,6 +56,7 @@ type Handlers struct {
 	faq        *faq.Repo
 	faqBuilder *faq.Builder
 	quiz       *quiz.Quiz
+	news       *news.Digester
 }
 
 // HandlersDeps — зависимости для сборки Handlers.
@@ -73,6 +75,7 @@ type HandlersDeps struct {
 	FAQ        *faq.Repo
 	FAQBuilder *faq.Builder
 	Quiz       *quiz.Quiz
+	News       *news.Digester
 }
 
 // NewHandlers собирает Handlers.
@@ -91,6 +94,7 @@ func NewHandlers(d HandlersDeps) *Handlers {
 		faq:        d.FAQ,
 		faqBuilder: d.FAQBuilder,
 		quiz:       d.Quiz,
+		news:       d.News,
 		chatIDs:    make(map[int64]struct{}, len(d.ChatIDs)),
 	}
 	for _, id := range d.ChatIDs {
@@ -276,6 +280,8 @@ func (h *Handlers) dispatchCommand(ctx context.Context, replyChatID, dataChatID 
 		h.cmdMe(ctx, replyChatID, dataChatID, msg)
 	case "quiz":
 		h.cmdQuiz(ctx, replyChatID, dataChatID, msg)
+	case "news":
+		h.cmdNews(ctx, replyChatID, dataChatID, msg)
 	default:
 		slog.Debug("unknown command", "cmd", cmd)
 	}
@@ -302,6 +308,7 @@ func (h *Handlers) cmdHelp(ctx context.Context, replyChatID int64) {
 /faq build — пересобрать FAQ из истории
 /kick @user — кик пользователя
 /quiz — запостить вопрос викторины
+/news — PHP-новости недели (релизы/пакеты/обсуждения)
 
 *Для всех:*
 /report (reply на сообщение или @user) — голосование за изгнание
@@ -383,6 +390,30 @@ func (h *Handlers) cmdQuiz(ctx context.Context, replyChatID, dataChatID int64, m
 		if err := h.quiz.Post(ctxBg, dataChatID); err != nil {
 			slog.Error("quiz post", "err", err)
 			_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось собрать вопрос викторины: "+err.Error())
+		}
+	}()
+}
+
+func (h *Handlers) cmdNews(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message) {
+	if msg.From == nil || !h.moderation.IsAdmin(msg.From.ID) {
+		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
+		return
+	}
+	if h.news == nil {
+		_ = SendMessage(ctx, h.api, replyChatID, "PHP-новости выключены.")
+		return
+	}
+	_ = SendMessage(ctx, h.api, replyChatID, "⏳ Собираю PHP-новости недели...")
+	go func() {
+		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
+		defer cancel()
+		if err := h.news.Post(ctxBg, dataChatID); err != nil {
+			if errors.Is(err, news.ErrNoNews) {
+				_ = SendMessage(ctxBg, h.api, replyChatID, "Нет свежих PHP-новостей на этот раз.")
+			} else {
+				slog.Error("news post", "err", err)
+				_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось собрать новости: "+err.Error())
+			}
 		}
 	}()
 }

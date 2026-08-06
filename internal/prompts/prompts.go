@@ -38,4 +38,5 @@ const (
 	Search  = "search.txt"
 	Me      = "me.txt"
 	Quiz    = "quiz.txt"
+	News    = "news.txt"
 )

@@ -20,6 +20,7 @@ import (
 	"phpbot/internal/faq"
 	"phpbot/internal/llm"
 	"phpbot/internal/messages"
+	"phpbot/internal/news"
 	"phpbot/internal/moderation"
 	"phpbot/internal/prompts"
 	"phpbot/internal/quiz"
@@ -129,12 +130,15 @@ func main() {
 	quizSched := quiz.NewScheduler(quizSvc, msgRepo, quizRepo)
 	annivSched := anniv.New(msgRepo, poster, cfg.ChatIDs)
 
+	newsRepo := news.NewRepository(dbx)
+	newsDigester := news.NewDigester(llmCheap, newsRepo, poster, cfg.ChatIDs, news.DefaultSources())
+
 	handlers := tg.NewHandlers(tg.HandlersDeps{
 		API: b, ChatIDs: cfg.ChatIDs, BotUserID: me.ID,
 		Moderation: moderFlow, Spam: spamFilter, Vote: voteKick,
 		Users: userRepo, Msgs: msgRepo, Vec: vecRepo,
 		Answerer: answerer, Digester: digester,
-		FAQ: faqRepo, FAQBuilder: faqBuilder, Quiz: quizSvc,
+		FAQ: faqRepo, FAQBuilder: faqBuilder, Quiz: quizSvc, News: newsDigester,
 	})
 	handlers.SetBotUsername(me.Username)
 
@@ -152,6 +156,12 @@ func main() {
 			slog.Error("quiz cron start", "err", err)
 		}
 		defer quizSched.Stop()
+	}
+	if cfg.NewsEnabled {
+		if err := newsDigester.Start(ctx, cfg.NewsCron); err != nil {
+			slog.Error("news cron start", "err", err)
+		}
+		defer newsDigester.Stop()
 	}
 	if cfg.AnniversaryEnabled {
 		if err := annivSched.Start(ctx, cfg.AnniversaryCron); err != nil {
