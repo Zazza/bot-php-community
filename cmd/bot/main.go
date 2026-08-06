@@ -128,7 +128,7 @@ func main() {
 	quizRepo := quiz.NewRepository(dbx)
 	quizSvc := quiz.New(b, llmClient, quizRepo, cfg.ChatIDs)
 	quizSched := quiz.NewScheduler(quizSvc, msgRepo, quizRepo)
-	annivSched := anniv.New(msgRepo, poster, cfg.ChatIDs)
+	annivSched := anniv.New(msgRepo, llmClient, poster, cfg.ChatIDs)
 
 	newsRepo := news.NewRepository(dbx)
 	newsDigester := news.NewDigester(llmCheap, newsRepo, poster, cfg.ChatIDs, news.DefaultSources())

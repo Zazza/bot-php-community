@@ -39,4 +39,5 @@ const (
 	Me      = "me.txt"
 	Quiz    = "quiz.txt"
 	News    = "news.txt"
+	Anniv   = "anniv.txt"
 )
