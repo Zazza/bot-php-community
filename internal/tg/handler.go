@@ -394,6 +394,9 @@ func (h *Handlers) cmdQuiz(ctx context.Context, replyChatID, dataChatID int64, m
 	}()
 }
 
+// cmdNews — админский запуск PHP-дайджеста. Постит туда, где вызван: в группе → в группу,
+// в ЛС → приватный превью админу (дедуп news_posted привязан к chat_id, поэтому превью в ЛС
+// не «съедает» недельные новости группы). dataChatID не используется (новости — внешний контент).
 func (h *Handlers) cmdNews(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message) {
 	if msg.From == nil || !h.moderation.IsAdmin(msg.From.ID) {
 		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
@@ -407,7 +410,7 @@ func (h *Handlers) cmdNews(ctx context.Context, replyChatID, dataChatID int64, m
 	go func() {
 		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
 		defer cancel()
-		if err := h.news.Post(ctxBg, dataChatID); err != nil {
+		if err := h.news.Post(ctxBg, replyChatID); err != nil {
 			if errors.Is(err, news.ErrNoNews) {
 				_ = SendMessage(ctxBg, h.api, replyChatID, "Нет свежих PHP-новостей на этот раз.")
 			} else {
