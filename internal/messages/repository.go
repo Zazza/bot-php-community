@@ -343,66 +343,6 @@ func (r *Repository) UserStats(ctx context.Context, chatID, userID int64) (*User
 	return s, nil
 }
 
-// MentionCount — число сообщений чата, упоминающих тему (keyword). Источник правды для
-// вопроса викторины «правда ли упоминали X».
-func (r *Repository) MentionCount(ctx context.Context, chatID int64, topic string) (int, error) {
-	normalized := normalizeTopic(topic)
-	if len(normalized) < 2 {
-		return 0, nil
-	}
-	var n int
-	if err := r.db.GetContext(ctx, &n, `
-		SELECT count(*) FROM messages
-		WHERE chat_id = $1 AND user_id <> 0
-		  AND regexp_replace(lower(text), '[^0-9a-zа-яё]', '', 'g') ILIKE $2
-	`, chatID, "%"+normalized+"%"); err != nil {
-		return 0, fmt.Errorf("mention count: %w", err)
-	}
-	return n, nil
-}
-
-// LeaderRow — участник и его показатель (счёт/среднее) по критерию лидерборда.
-type LeaderRow struct {
-	UserID   int64   `db:"user_id"`
-	Username string  `db:"username"`
-	Score    float64 `db:"score"`
-}
-
-// Leaderboard — топ участников по критерию: "night" (сообщения 0-5 утра), "code" (с кодом),
-// "long" (средняя длина). Показатель > 0, сортировка по убыванию.
-func (r *Repository) Leaderboard(ctx context.Context, chatID int64, criterion string, limit int) ([]LeaderRow, error) {
-	if limit <= 0 {
-		limit = 5
-	}
-	var agg string
-	switch criterion {
-	case "night":
-		agg = `count(*) FILTER (WHERE EXTRACT(HOUR FROM ts) < 6)`
-	case "code":
-		agg = `count(*) FILTER (WHERE text ILIKE '%'||repeat(chr(96),3)||'%' OR text LIKE '%=>%' OR text LIKE '%;')`
-	case "long":
-		agg = `avg(char_length(text))`
-	default:
-		return nil, nil
-	}
-	var rows []LeaderRow
-	if err := r.db.SelectContext(ctx, &rows, `
-		SELECT m.user_id,
-		       COALESCE(NULLIF(MAX(u.username),''), NULLIF(MAX(m.username),''), 'user') AS username,
-		       `+agg+` AS score
-		FROM messages m
-		LEFT JOIN users u ON u.tg_user_id = m.user_id
-		WHERE m.chat_id = $1 AND m.user_id <> 0
-		GROUP BY m.user_id
-		HAVING `+agg+` > 0
-		ORDER BY score DESC
-		LIMIT $2
-	`, chatID, limit); err != nil {
-		return nil, fmt.Errorf("leaderboard: %w", err)
-	}
-	return rows, nil
-}
-
 // Anniversary — участник и дата его первого сообщения в чате.
 type Anniversary struct {
 	UserID   int64

@@ -6,64 +6,116 @@ import (
 	"testing"
 )
 
-func TestTopDistinct(t *testing.T) {
-	cases := []struct {
-		in   []string
-		want []string
-	}{
-		{[]string{"a", "b", "a", "c", "user", "", "b"}, []string{"a", "b", "c"}},
-		{[]string{"x", "x", "x"}, []string{"x"}},
-		{[]string{}, []string{}},
-		{[]string{"", "user", "  "}, []string{}},
-	}
-	for _, c := range cases {
-		got := topDistinct(c.in, 4)
-		if !reflect.DeepEqual(got, c.want) {
-			t.Errorf("topDistinct(%v) = %v, want %v", c.in, got, c.want)
-		}
-	}
-	// лимит n
-	if got := topDistinct([]string{"a", "b", "c", "d", "e"}, 3); len(got) != 3 {
-		t.Errorf("limit: got %v", got)
-	}
-}
-
-func TestNewQuestionShuffleKeepsCorrect(t *testing.T) {
-	opts := []string{"alice", "bob", "carol", "dave"}
-	for i := 0; i < 20; i++ {
-		q := newQuestion("k", "p", opts, 0) // верный — alice
-		if q.Opts[q.Correct] != "alice" {
-			t.Fatalf("correct index wrong: opts=%v correct=%d", q.Opts, q.Correct)
-		}
-		if len(q.Opts) != 4 {
-			t.Fatalf("opts len: %d", len(q.Opts))
-		}
-		seen := map[string]int{}
-		for _, o := range q.Opts {
-			seen[o]++
-		}
-		if seen["alice"] != 1 {
-			t.Fatalf("alice not unique: %v", q.Opts)
-		}
-	}
-}
-
-func TestExtractJSONArray(t *testing.T) {
+func TestNormalizeKey(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{`вот ["Yii4","PHP 9"] список`, `["Yii4","PHP 9"]`},
-		{`[1,2,3]`, `[1,2,3]`},
-		{`нет массива`, `[]`},
+		{"Что выведет: echo '1' + '1a';?", "что выведет echo 1 1a"},
+		{"  PHP-8??   type_juggling!! ", "php 8 type juggling"},
+		{"Привет, ёж!", "привет ёж"},
+		{"", ""},
 	}
 	for _, c := range cases {
-		if got := extractJSONArray(c.in); got != c.want {
-			t.Errorf("extractJSONArray(%q) = %q, want %q", c.in, got, c.want)
+		if got := normalizeKey(c.in); got != c.want {
+			t.Errorf("normalizeKey(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+	// регистронезависимость + идентичность нормализации для дедупа
+	if normalizeKey("Type-Juggling!") != normalizeKey("type juggling") {
+		t.Error("normalizeKey should be case/punct-insensitive")
+	}
+}
+
+func TestParseVerify(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"1", 1},
+		{"-1", -1},
+		{"  2  ", 2},
+		{"Ответ: 0", 0},
+		{"3.", 3},
+		{"-1.", -1},
+		{"непонятно", -1},
+		{"", -1},
+	}
+	for _, c := range cases {
+		if got := parseVerify(c.in); got != c.want {
+			t.Errorf("parseVerify(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestExtractJSONObject(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`{"a":1}`, `{"a":1}`},
+		{`вот {"category":"x","correct":2} как-то так`, `{"category":"x","correct":2}`},
+		{"```json\n{\"a\":1}\n```", `{"a":1}`},
+		{"нет объекта", "{}"},
+	}
+	for _, c := range cases {
+		if got := extractJSONObject(c.in); got != c.want {
+			t.Errorf("extractJSONObject(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestValidQuiz(t *testing.T) {
+	opts4 := []string{"a", "b", "c", "d"}
+	cases := []struct {
+		name string
+		q    *quizJSON
+		want bool
+	}{
+		{"valid", &quizJSON{Question: "Q", Options: opts4, Correct: 2}, true},
+		{"skip", &quizJSON{Skip: true, Question: "Q", Options: opts4, Correct: 0}, true}, // skip не валидирует структуру
+		{"nil", nil, false},
+		{"empty question", &quizJSON{Options: opts4, Correct: 0}, false},
+		{"three opts", &quizJSON{Question: "Q", Options: []string{"a", "b", "c"}, Correct: 0}, false},
+		{"empty opt", &quizJSON{Question: "Q", Options: []string{"a", "b", "c", "  "}, Correct: 0}, false},
+		{"correct out of range", &quizJSON{Question: "Q", Options: opts4, Correct: 4}, false},
+		{"correct negative", &quizJSON{Question: "Q", Options: opts4, Correct: -1}, false},
+	}
+	for _, c := range cases {
+		if got := validQuiz(c.q); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestTrimOpts(t *testing.T) {
+	got := trimOpts([]string{"  a ", "b", "c", "d", "e"})
+	want := []string{"a", "b", "c", "d"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("trimOpts = %v, want %v", got, want)
+	}
+}
+
+// TestBuildSeenKeysDedup — регрессия на баг-дубликат: тот же вопрос другой формулировкой
+// должен детектиться как повтор (нормализация срезает пунктуацию/регистр/лишние пробелы).
+func TestBuildSeenKeysDedup(t *testing.T) {
+	recent := []RecentKey{
+		{Category: "Type-Juggling", Question: "Что выведет: echo '1' + '1a'; ?"},
+		{Category: "psr", Question: "Какой PSR описывает автозагрузчик?"},
+	}
+	text, cats := buildSeenKeys(recent)
+
+	// перефразированный/другорегистровый тот же вопрос — повтор
+	if _, dup := text[normalizeKey("что выведет echo '1' + '1a';?")]; !dup {
+		t.Error("rephrased duplicate question not detected")
+	}
+	// совсем другой вопрос — не повтор
+	if _, dup := text[normalizeKey("Какой PSR описывает логер?")]; dup {
+		t.Error("different question falsely flagged as duplicate")
+	}
+	// категория тоже нормализована
+	if _, ok := cats["type juggling"]; !ok {
+		t.Errorf("category not normalized: %v", cats)
 	}
 }
 
 func TestRenderQuestion(t *testing.T) {
-	got := renderQuestion("Кто?", []string{"Да", "Нет", "", ""}, 0, 0)
-	for _, want := range []string{"🧩 Кто?", "A) Да", "B) Нет"} {
+	got := renderQuestion("Что выведет?", []string{"1", "2", "3", "4"}, 0, 0)
+	for _, want := range []string{"🧩 Что выведет?", "A) 1", "D) 4"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
@@ -72,33 +124,28 @@ func TestRenderQuestion(t *testing.T) {
 		t.Errorf("tally should be hidden at 0:\n%s", got)
 	}
 
-	got2 := renderQuestion("Кто?", []string{"Да", "Нет", "", ""}, 5, 2)
+	got2 := renderQuestion("Q", []string{"a", "b", "c", "d"}, 5, 2)
 	for _, want := range []string{"Голосов: 5", "Верно: 2"} {
 		if !strings.Contains(got2, want) {
 			t.Errorf("missing %q in:\n%s", want, got2)
 		}
 	}
-
-	got3 := renderQuestion("Q", []string{"a", "b", "c", "d"}, 0, 0)
-	for _, want := range []string{"A) a", "B) b", "C) c", "D) d"} {
-		if !strings.Contains(got3, want) {
-			t.Errorf("missing %q in:\n%s", want, got3)
-		}
-	}
 }
 
 func TestRevealToast(t *testing.T) {
-	row := &Row{Question: "Кто?", Opt1: "alice", Opt2: "bob", Opt3: "carol", Opt4: "dave", Correct: 1}
-	counts := map[int]int{0: 2, 1: 3, 3: 1} // bob (idx1) — верный
+	row := &Row{Question: "Q", Opt1: "a", Opt2: "b", Opt3: "c", Opt4: "d", Correct: 1,
+		Explanation: "потому что приведение типов"}
+	counts := map[int]int{0: 2, 1: 3, 3: 1} // b (idx1) — верный
 	got := revealToast(row, counts)
-	for _, want := range []string{"Правильно: B) bob", "верно 3 из 6"} {
+	for _, want := range []string{"Правильно: B) b", "верно 3 из 6", "💡 потому что приведение типов"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in: %s", want, got)
 		}
 	}
-	// без голосов — без счётчика
+
+	// без голосов и без объяснения — компактно
 	got0 := revealToast(&Row{Opt1: "a", Opt2: "b", Correct: 0}, map[int]int{})
-	if !strings.Contains(got0, "Правильно: A) a") || strings.Contains(got0, "верно") {
-		t.Errorf("unexpected no-vote toast: %s", got0)
+	if !strings.Contains(got0, "Правильно: A) a") || strings.Contains(got0, "верно") || strings.Contains(got0, "💡") {
+		t.Errorf("unexpected bare toast: %s", got0)
 	}
 }

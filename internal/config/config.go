@@ -41,7 +41,7 @@ type Config struct {
 	VoteQuorum         int
 	AnniversaryCron    string
 	AnniversaryEnabled bool
-	QuizCron           string
+	QuizCheckCron      string
 	QuizEnabled        bool
 }
 
@@ -76,7 +76,7 @@ func Load() (*Config, error) {
 		VoteQuorum:         envInt("PHPBOT_VOTE_QUORUM", 3),
 		AnniversaryCron:    envOr("PHPBOT_ANNIVERSARY_CRON", "0 8 * * *"),
 		AnniversaryEnabled: envBool("PHPBOT_ANNIVERSARY_ENABLED", true),
-		QuizCron:           envOr("PHPBOT_QUIZ_CRON", "0 19 * * *"),
+		QuizCheckCron:      envOr("PHPBOT_QUIZ_CHECK_CRON", "*/15 * * * *"),
 		QuizEnabled:        envBool("PHPBOT_QUIZ_ENABLED", true),
 	}
 	c.AdminIDs = envInt64List("PHPBOT_ADMIN_IDS")

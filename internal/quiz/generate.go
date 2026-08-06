@@ -5,220 +5,212 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
+	"strconv"
 	"strings"
 
 	"phpbot/internal/llm"
-	"phpbot/internal/messages"
 	"phpbot/internal/prompts"
 )
 
-// errNoData — типа не хватило данных для 4 вариантов (оркестратор попробует другой тип).
-var errNoData = errors.New("недостаточно данных для вопроса")
+// errGenFailed — ни одна попытка не дала проверенного вопроса (LLM не уверен / повтор).
+// cron при этой ошибке пропускает день — fail-safe: лучше молчание, чем неверный ответ.
+var errGenFailed = errors.New("не удалось собрать проверенный вопрос викторины")
 
-// seedTerms — термины из мира PHP/веб, по которым в истории наверняка есть обсуждения.
-var seedTerms = []string{
-	"yii3", "yii2", "laravel", "symfony", "composer", "phpunit", "psr",
-	"docker", "pgvector", "postgres", "mysql", "redis", "nginx", "git",
-	"php8", "swoole", "roadrunner", "amphp", "psalm", "phpstan",
-	"xdebug", "monolog", "doctrine", "twig", "blade", "reactphp",
-	"vue", "react", "typescript", "kubernetes", "websocket", "grpc",
-	"graphql", "memcached", "gitlab", "rabbitmq", "elasticsearch",
-}
+// maxAttempts — число попыток генерация+верификация, прежде чем сдаться.
+const maxAttempts = 3
 
-// Generator собирает вопрос из истории чата. Корректность всегда из БД; LLM только
-// сочиняет «обманки» для true/false-вопросов.
+// dedupDays — окно дедупа по содержанию (не повторять тему/вопрос).
+const dedupDays = 30
+
+// Generator собирает знаниевый вопрос через LLM и независимой сверкой защищает верный ответ.
 type Generator struct {
-	msgs *messages.Repository
 	llm  *llm.LLMClient
 	repo *Repository
 }
 
-// Generate перебирает типы в случайном порядке и возвращает первый собравшийся.
-// Тип предыдущей викторины в чате исключается, чтобы не было повтора два дня подряд.
+// quizJSON — структура ответа генератора (строгий JSON из quiz.txt).
+type quizJSON struct {
+	Skip        bool     `json:"skip"`
+	Category    string   `json:"category"`
+	Question    string   `json:"question"`
+	Options     []string `json:"options"`
+	Correct     int      `json:"correct"`
+	Explanation string   `json:"explanation"`
+}
+
+// Generate: LLM генерит MCQ по знаниям PHP → дедуп по содержанию → независимая self-verify
+// верного ответа. Повтор/не сошлось/LLM не уверен → следующая попытка. Сначала идём со строгим
+// дедупом; если за maxAttempts вариантов не осталось — ослабляем окно (без текст-дедупа, но
+// всё ещё с verify). Все попытки провалились → ошибка (cron пропустит день).
 func (g *Generator) Generate(ctx context.Context, chatID int64) (*Question, error) {
-	last, _ := g.repo.LastKind(ctx, chatID)
-	all := []string{"whoTop", "stat", "mentioned"}
-	kinds := make([]string, 0, len(all))
-	for _, k := range all {
-		if k != last {
-			kinds = append(kinds, k)
-		}
-	}
-	if len(kinds) == 0 {
-		kinds = all
-	}
-	rand.Shuffle(len(kinds), func(i, j int) { kinds[i], kinds[j] = kinds[j], kinds[i] })
-	for _, k := range kinds {
-		var (
-			q   *Question
-			err error
-		)
-		switch k {
-		case "whoTop":
-			q, err = g.genWhoTop(ctx, chatID)
-		case "stat":
-			q, err = g.genStat(ctx, chatID)
-		case "mentioned":
-			q, err = g.genMentioned(ctx, chatID)
-		}
-		if err == nil && q != nil {
-			return q, nil
-		}
-	}
-	return nil, fmt.Errorf("ни один тип не собрался (мало данных в чате)")
-}
-
-// genWhoTop — «Кто чаще всех говорил про X?» (топ по числу упоминаний).
-func (g *Generator) genWhoTop(ctx context.Context, chatID int64) (*Question, error) {
-	for _, t := range shuffledTerms() {
-		rows, err := g.msgs.ExpertByKeyword(ctx, chatID, t, 5)
-		if err != nil || len(rows) < 4 {
-			continue
-		}
-		names := make([]string, 0, len(rows))
-		for _, r := range rows {
-			names = append(names, r.Username)
-		}
-		opts := topDistinct(names, 4)
-		if len(opts) < 4 {
-			continue
-		}
-		return newQuestion("whoTop", fmt.Sprintf("Кто чаще всех говорил в чате про «%s»?", t), opts, 0), nil
-	}
-	return nil, errNoData
-}
-
-// genStat — «Кто самый ночной / кодер / длиннопис?» (лидерборд по критерию).
-func (g *Generator) genStat(ctx context.Context, chatID int64) (*Question, error) {
-	type spec struct {
-		criterion, prompt string
-	}
-	specs := []spec{
-		{"night", "Кто чаще всех пишет ночью (0–5 утра)?"},
-		{"code", "Кто чаще всех пишет код?"},
-		{"long", "Кто пишет самые длинные сообщения?"},
-	}
-	pi := rand.Perm(len(specs))
-	for _, i := range pi {
-		s := specs[i]
-		rows, err := g.msgs.Leaderboard(ctx, chatID, s.criterion, 5)
-		if err != nil || len(rows) < 4 {
-			continue
-		}
-		names := make([]string, 0, len(rows))
-		for _, r := range rows {
-			names = append(names, r.Username)
-		}
-		opts := topDistinct(names, 4)
-		if len(opts) < 4 {
-			continue
-		}
-		return newQuestion("stat", s.prompt, opts, 0), nil
-	}
-	return nil, errNoData
-}
-
-// genMentioned — «Правда ли, что упоминали X?» (true/false). TRUE — редкий реальный термин
-// (count 1..3); FALSE — несуществующий термин от LLM (Yii4 и т.п.) или реальный, но count==0.
-func (g *Generator) genMentioned(ctx context.Context, chatID int64) (*Question, error) {
-	// TRUE: редкий реальный термин.
-	if rand.Intn(2) == 0 {
-		for _, t := range shuffledTerms() {
-			c, err := g.msgs.MentionCount(ctx, chatID, t)
-			if err == nil && c >= 1 && c <= 3 {
-				return &Question{
-					Kind: "mentioned", Opts: []string{"Да", "Нет"}, Correct: 0,
-					Prompt: fmt.Sprintf("Правда ли, что в чате упоминали «%s»?", t),
-				}, nil
+	recent, _ := g.repo.RecentKeys(ctx, chatID, dedupDays)
+	seenText, seenCats := buildSeenKeys(recent)
+	avoid := categoryList(seenCats)
+	for _, enforceDedup := range []bool{true, false} {
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			raw, err := g.genOne(ctx, avoid)
+			if err != nil || raw == nil || raw.Skip || !validQuiz(raw) {
+				continue
 			}
-		}
-	}
-	// FALSE: проверяем кандидатов (LLM-обманки + seed), оставляем count==0.
-	cands := append(g.fakeTerms(ctx), shuffledTerms()...)
-	for _, t := range cands {
-		c, err := g.msgs.MentionCount(ctx, chatID, t)
-		if err == nil && c == 0 {
+			if enforceDedup {
+				if _, dup := seenText[normalizeKey(raw.Question)]; dup {
+					continue
+				}
+			}
+			ok, err := g.verify(ctx, raw)
+			if err != nil || !ok {
+				continue
+			}
 			return &Question{
-				Kind: "mentioned", Opts: []string{"Да", "Нет"}, Correct: 1,
-				Prompt: fmt.Sprintf("Правда ли, что в чате упоминали «%s»?", t),
+				Kind:        strings.TrimSpace(raw.Category),
+				Prompt:      strings.TrimSpace(raw.Question),
+				Opts:        trimOpts(raw.Options),
+				Correct:     raw.Correct,
+				Explanation: strings.TrimSpace(raw.Explanation),
 			}, nil
 		}
 	}
-	return nil, errNoData
+	return nil, errGenFailed
 }
 
-// fakeTerms просит LLM придумать правдоподобные несуществующие PHP-термины.
-func (g *Generator) fakeTerms(ctx context.Context) []string {
+// genOne просит LLM сгенерировать один MCQ, избегая недавних категорий.
+func (g *Generator) genOne(ctx context.Context, avoid []string) (*quizJSON, error) {
+	user := "Сгенерируй один вопрос для викторины по знаниям PHP/веб."
+	if len(avoid) > 0 {
+		user += " Уже были темы — не повторяй их: " + strings.Join(avoid, ", ") + "."
+	}
 	resp, _, _, err := g.llm.Chat(ctx, []llm.Message{
 		{Role: "system", Content: prompts.Get(prompts.Quiz)},
-		{Role: "user", Content: "Сгенерируй 12 правдоподобных несуществующих терминов."},
+		{Role: "user", Content: user},
 	})
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("quiz gen chat: %w", err)
 	}
-	var terms []string
-	if err := json.Unmarshal([]byte(extractJSONArray(resp)), &terms); err != nil {
-		return nil
+	var q quizJSON
+	if err := json.Unmarshal([]byte(extractJSONObject(resp)), &q); err != nil {
+		return nil, nil
 	}
-	out := make([]string, 0, len(terms))
-	for _, t := range terms {
-		t = strings.TrimSpace(t)
-		if len(t) >= 2 && len(t) <= 24 {
-			out = append(out, t)
-		}
-	}
-	return out
+	return &q, nil
 }
 
-// newQuestion перемешивает варианты и проставляет индекс правильного.
-func newQuestion(kind, prompt string, opts []string, correctIdx int) *Question {
-	correctVal := opts[correctIdx]
-	perm := rand.Perm(len(opts))
-	out := make([]string, len(opts))
-	for i, p := range perm {
-		out[p] = opts[i]
-	}
-	ci := 0
-	for i, o := range out {
-		if o == correctVal {
-			ci = i
+// verify — независимая сверка верного ответа. Вернёт true, только если второй вызов
+// однозначно указывает на тот же индекс; -1 (неоднозначно/некорректно) → отбраковка.
+func (g *Generator) verify(ctx context.Context, q *quizJSON) (bool, error) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Вопрос: %s\nВарианты:\n", strings.TrimSpace(q.Question))
+	letters := "ABCD"
+	for i, o := range q.Options {
+		if i >= len(letters) {
 			break
 		}
+		fmt.Fprintf(&b, "%c) %s\n", letters[i], strings.TrimSpace(o))
 	}
-	return &Question{Kind: kind, Prompt: prompt, Opts: out, Correct: ci}
+	resp, _, _, err := g.llm.Chat(ctx, []llm.Message{
+		{Role: "system", Content: "Ты PHP-эксперт. Для вопроса викторины верни ОДНУ цифру — " +
+			"индекс верного варианта (0-3). Если верных несколько, ни одного или вопрос " +
+			"допускает трактовки — верни -1. Только цифра, без текста."},
+		{Role: "user", Content: b.String()},
+	})
+	if err != nil {
+		return false, fmt.Errorf("quiz verify chat: %w", err)
+	}
+	idx := parseVerify(resp)
+	return idx >= 0 && idx == q.Correct, nil
 }
 
-// topDistinct берёт первые n уникальных осмысленных имён (пропускает пустое и «user»).
-func topDistinct(names []string, n int) []string {
-	out := make([]string, 0, n)
-	seen := map[string]bool{}
-	for _, nm := range names {
-		nm = strings.TrimSpace(nm)
-		if nm == "" || nm == "user" || seen[nm] {
-			continue
+// validQuiz проверяет структуру: ровно 4 непустых варианта, корректный индекс в диапазоне,
+// непустой вопрос.
+func validQuiz(q *quizJSON) bool {
+	if q == nil || strings.TrimSpace(q.Question) == "" {
+		return false
+	}
+	if len(q.Options) != 4 {
+		return false
+	}
+	for _, o := range q.Options {
+		if strings.TrimSpace(o) == "" {
+			return false
 		}
-		seen[nm] = true
-		out = append(out, nm)
-		if len(out) == n {
+	}
+	if q.Correct < 0 || q.Correct > 3 {
+		return false
+	}
+	return true
+}
+
+// normalizeKey приводит текст к каноничному виду для дедупа: нижний регистр, удаление
+// небуквенно-цифровых, схлопывание пробелов.
+func normalizeKey(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r >= 'а' && r <= 'я', r == 'ё':
+			b.WriteRune(r)
+		default:
+			b.WriteRune(' ')
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+// trimOptions обрезает варианты до 4 и тримит пробелы.
+func trimOpts(opts []string) []string {
+	out := make([]string, 0, 4)
+	for i, o := range opts {
+		if i >= 4 {
 			break
 		}
+		out = append(out, strings.TrimSpace(o))
 	}
 	return out
 }
 
-func shuffledTerms() []string {
-	out := append([]string(nil), seedTerms...)
-	rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+func categoryList(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
 	return out
 }
 
-// extractJSONArray вырезает первый JSON-массив из ответа LLM (может быть с пояснениями).
-func extractJSONArray(s string) string {
-	i := strings.IndexByte(s, '[')
-	j := strings.LastIndexByte(s, ']')
+// buildSeenKeys собирает множества нормализованных текстов и категорий недавних вопросов
+// для дедупа по содержанию.
+func buildSeenKeys(recent []RecentKey) (text, cats map[string]struct{}) {
+	text = make(map[string]struct{}, len(recent))
+	cats = make(map[string]struct{}, len(recent))
+	for _, k := range recent {
+		text[normalizeKey(k.Question)] = struct{}{}
+		if c := normalizeKey(k.Category); c != "" {
+			cats[c] = struct{}{}
+		}
+	}
+	return text, cats
+}
+
+// parseVerify достаёт целочисленный вердикт verifier'а (первый токен-число; -1 = неоднозначно).
+func parseVerify(s string) int {
+	for _, tok := range strings.Fields(strings.TrimSpace(s)) {
+		tok = strings.TrimRight(tok, ".,;:!?")
+		if n, err := strconv.Atoi(tok); err == nil {
+			return n
+		}
+	}
+	return -1
+}
+
+// extractJSONObject вырезает первый JSON-объект из ответа LLM (с пояснениями и markdown-оградкой).
+func extractJSONObject(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "```") {
+		if i := strings.IndexByte(s, '\n'); i >= 0 {
+			s = s[i+1:]
+		}
+		s = strings.TrimSuffix(strings.TrimSpace(s), "```")
+	}
+	i := strings.IndexByte(s, '{')
+	j := strings.LastIndexByte(s, '}')
 	if i < 0 || j < 0 || j < i {
-		return "[]"
+		return "{}"
 	}
 	return s[i : j+1]
 }

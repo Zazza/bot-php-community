@@ -10,7 +10,6 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"phpbot/internal/llm"
-	"phpbot/internal/messages"
 )
 
 // Quiz — домен викторины: генерит вопрос, постит с кнопками, обрабатывает ответы.
@@ -22,8 +21,8 @@ type Quiz struct {
 }
 
 // New создаёт Quiz.
-func New(api *bot.Bot, llm *llm.LLMClient, msgs *messages.Repository, repo *Repository, chatIDs []int64) *Quiz {
-	return &Quiz{api: api, gen: &Generator{msgs: msgs, llm: llm, repo: repo}, repo: repo, chatIDs: chatIDs}
+func New(api *bot.Bot, llm *llm.LLMClient, repo *Repository, chatIDs []int64) *Quiz {
+	return &Quiz{api: api, gen: &Generator{llm: llm, repo: repo}, repo: repo, chatIDs: chatIDs}
 }
 
 // Post генерирует вопрос и шлёт его с inline-кнопками в чат.
@@ -98,6 +97,9 @@ func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery)
 	} else {
 		toast = fmt.Sprintf("Ты выбрал %c) %s — ❌. Правильно: %c) %s", letters[choice], picked, letters[row.Correct], right)
 	}
+	if ex := strings.TrimSpace(row.Explanation); ex != "" {
+		toast += "\n💡 " + ex
+	}
 
 	// live-tally: обновим сообщение (кнопки оставляем — отвечает каждый по разу).
 	total, correct, _ := q.repo.CountBallots(ctx, id)
@@ -146,6 +148,9 @@ func revealToast(row *Row, counts map[int]int) string {
 	s := fmt.Sprintf("👁 Правильно: %c) %s", letters[row.Correct], strings.TrimSpace(opts[row.Correct]))
 	if total > 0 {
 		s += fmt.Sprintf(" (верно %d из %d)", counts[row.Correct], total)
+	}
+	if ex := strings.TrimSpace(row.Explanation); ex != "" {
+		s += "\n💡 " + ex
 	}
 	return s
 }

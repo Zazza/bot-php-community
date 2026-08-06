@@ -125,8 +125,8 @@ func main() {
 	digester := topics.NewDigester(dbx, llmCheap, msgRepo, poster, cfg.ChatIDs)
 
 	quizRepo := quiz.NewRepository(dbx)
-	quizSvc := quiz.New(b, llmCheap, msgRepo, quizRepo, cfg.ChatIDs)
-	quizSched := quiz.NewScheduler(quizSvc)
+	quizSvc := quiz.New(b, llmClient, quizRepo, cfg.ChatIDs)
+	quizSched := quiz.NewScheduler(quizSvc, msgRepo, quizRepo)
 	annivSched := anniv.New(msgRepo, poster, cfg.ChatIDs)
 
 	handlers := tg.NewHandlers(tg.HandlersDeps{
@@ -148,7 +148,7 @@ func main() {
 		slog.Error("faq cron start", "err", err)
 	}
 	if cfg.QuizEnabled {
-		if err := quizSched.Start(ctx, cfg.QuizCron); err != nil {
+		if err := quizSched.Start(ctx, cfg.QuizCheckCron); err != nil {
 			slog.Error("quiz cron start", "err", err)
 		}
 		defer quizSched.Stop()
