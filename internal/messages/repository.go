@@ -345,9 +345,9 @@ func (r *Repository) UserStats(ctx context.Context, chatID, userID int64) (*User
 
 // Anniversary — участник и дата его первого сообщения в чате.
 type Anniversary struct {
-	UserID   int64
-	Username string
-	First    time.Time
+	UserID   int64     `db:"user_id"`
+	Username string    `db:"username"`
+	First    time.Time `db:"first"`
 }
 
 // Anniversaries возвращает участников, у кого сегодня годовщина ПЕРВОГО сообщения в чате
