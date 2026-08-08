@@ -82,6 +82,10 @@ func (f *Flow) HandleGateCallback(ctx context.Context, cb *models.CallbackQuery)
 		return "Проверка уже завершена"
 	}
 
+	if !gateClickAllowed(g, cb.From.ID) {
+		return "Это проверка не для тебя 🙂"
+	}
+
 	if opt == g.CorrectOption {
 		// Верно → размьют до «только текст» (линк-провация).
 		if err := f.restrictTextOnly(ctx, g.ChatID, g.TGUserID); err != nil {
@@ -255,6 +259,13 @@ func atUser(username, fallback string) string {
 		return fallback
 	}
 	return "@" + username
+}
+
+// gateClickAllowed — капча адресована конкретному новичку: засчитывается только
+// его клик. Иначе любой участник (или подельник спамера) решит мат-капчу за него
+// и размотчит аккаунт.
+func gateClickAllowed(g *GateRecord, clickerID int64) bool {
+	return g != nil && g.TGUserID == clickerID && clickerID != 0
 }
 
 // genCaptcha возвращает выражение, 4 варианта ответа и индекс верного.

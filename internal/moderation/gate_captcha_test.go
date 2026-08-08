@@ -55,3 +55,28 @@ func TestGenCaptcha(t *testing.T) {
 		}
 	}
 }
+
+// TestGateClickAllowed — регрессия: капчу новичка может решить ТОЛЬКО сам новичок.
+// Раньше HandleGateCallback принимал верный ответ от любого участника → сторонний
+// человек (или подельник спамера) кликал верный вариант и разматчивал аккаунт.
+func TestGateClickAllowed(t *testing.T) {
+	newbie := &GateRecord{TGUserID: 4242}
+	cases := []struct {
+		name      string
+		gate      *GateRecord
+		clickerID int64
+		want      bool
+	}{
+		{"newbie_himself", newbie, 4242, true},
+		{"bystander_blocked", newbie, 9999, false},
+		{"zero_clicker_blocked", newbie, 0, false},
+		{"nil_gate_blocked", nil, 4242, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := gateClickAllowed(c.gate, c.clickerID); got != c.want {
+				t.Errorf("gateClickAllowed(clicker=%d) = %v, want %v", c.clickerID, got, c.want)
+			}
+		})
+	}
+}
