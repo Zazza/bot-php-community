@@ -80,7 +80,7 @@ func Load() (*Config, error) {
 		AnniversaryEnabled: envBool("PHPBOT_ANNIVERSARY_ENABLED", true),
 		QuizCheckCron:      envOr("PHPBOT_QUIZ_CHECK_CRON", "*/15 * * * *"),
 		QuizEnabled:        envBool("PHPBOT_QUIZ_ENABLED", true),
-		NewsCron:           envOr("PHPBOT_NEWS_CRON", "0 8 * * 1"),
+		NewsCron:           envOr("PHPBOT_NEWS_CRON", "0 19 * * *"),
 		NewsEnabled:        envBool("PHPBOT_NEWS_ENABLED", true),
 	}
 	c.AdminIDs = envInt64List("PHPBOT_ADMIN_IDS")

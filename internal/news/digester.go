@@ -26,7 +26,7 @@ var ErrNoNews = errors.New("no fresh news")
 // freshWindow — считаем свежими новости за этот период.
 const freshWindow = 7 * 24 * time.Hour
 
-// Digester собирает еженедельный PHP-дайджест: фетч фидов → дедуп → LLM-куратория → пост.
+// Digester собирает PHP-дайджест: фетч фидов → дедуп → LLM-куратория → пост.
 type Digester struct {
 	sources []Source
 	llm     *llm.LLMClient
@@ -44,7 +44,7 @@ func NewDigester(llm *llm.LLMClient, repo *Repository, api Poster, chatIDs []int
 	return &Digester{sources: sources, llm: llm, repo: repo, api: api, chatIDs: chatIDs}
 }
 
-// Start регистрирует еженедельный пост (по умолчанию пн 08:00) и запускает cron.
+// Start регистрирует пост дайджеста (по умолчанию ежедневно 19:00) и запускает cron.
 func (d *Digester) Start(ctx context.Context, spec string) error {
 	c := cron.New()
 	_, err := c.AddFunc(spec, func() {
@@ -103,7 +103,7 @@ func (d *Digester) Post(ctx context.Context, chatID int64) error {
 	if composed == "" {
 		return ErrNoNews
 	}
-	text := "📰 **PHP-дайджест недели**\n\n" + composed
+	text := "📰 **PHP-дайджест**\n\n" + composed
 	if err := d.api.PostMessage(ctx, chatID, text); err != nil {
 		return fmt.Errorf("post news: %w", err)
 	}
