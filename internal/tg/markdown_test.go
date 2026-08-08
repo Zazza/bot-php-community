@@ -20,6 +20,12 @@ func TestMdToHTML(t *testing.T) {
 		{"bold no close left as-is", "**bold", "**bold"},
 		{"mixed", "Result: **yes**\n```go\nx := 1\n```\nSee `x`.",
 			"Result: <b>yes</b>\n<pre><code>x := 1\n</code></pre>\nSee <code>x</code>."},
+		{"markdown link", "See [docs](https://x.com/a).", "See <a href=\"https://x.com/a\">docs</a>."},
+		{"link emoji text", "[🔗](https://x.com)", "<a href=\"https://x.com\">🔗</a>"},
+		{"link escapes ampersand in href", "[a](https://x.com/p?q=1&k=2)", "<a href=\"https://x.com/p?q=1&amp;k=2\">a</a>"},
+		{"lone bracket not a link", "RFC [для свойств] текст", "RFC [для свойств] текст"},
+		{"unclosed link left as-is", "See [docs no close", "See [docs no close"},
+		{"bracket then real link", "[x] then [y](https://z.com)", "[x] then <a href=\"https://z.com\">y</a>"},
 	}
 	for _, c := range cases {
 		if got := mdToHTML(c.in); got != c.want {

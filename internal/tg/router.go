@@ -62,16 +62,18 @@ func SendMessage(ctx context.Context, api *bot.Bot, chatID int64, text string) e
 }
 
 // mdToHTML переводит подмножество markdown из ответов LLM в Telegram HTML: fenced ```code```,
-// inline `code`, **bold**. Весь остальной текст проходит через html.EscapeString, поэтому
-// парс не может сломаться на '.', '-', '>', '<' и прочих спецсимволах (главная боль MarkdownV2).
+// inline `code`, **bold**, [text](url). Весь остальной текст проходит через html.EscapeString,
+// поэтому парс не может сломаться на '.', '-', '>', '<' и прочих спецсимволах (главная боль
+// MarkdownV2). '[' без полного паттерна ](...) выводится как обычный символ.
 func mdToHTML(s string) string {
 	var b strings.Builder
 	for len(s) > 0 {
 		fF := strings.Index(s, "```")
 		fB := strings.Index(s, "**")
 		fI := strings.IndexByte(s, '`')
+		fL := strings.IndexByte(s, '[')
 		pos := -1
-		for _, v := range []int{fF, fB, fI} {
+		for _, v := range []int{fF, fB, fI, fL} {
 			if v >= 0 && (pos < 0 || v < pos) {
 				pos = v
 			}
@@ -109,6 +111,27 @@ func mdToHTML(s string) string {
 			b.WriteString(html.EscapeString(rest[2 : 2+end]))
 			b.WriteString("</b>")
 			s = rest[2+end+2:]
+		case strings.HasPrefix(rest, "["):
+			// markdown-ссылка [text](url) → <a href>. '[', не входящий в полный паттерн
+			// (нет ']' или после ']' нет '(', или нет закрывающей ')') — обычный символ.
+			closeBracket := strings.IndexByte(rest[1:], ']')
+			afterParen := ""
+			closeParen := -1
+			if closeBracket >= 0 && strings.HasPrefix(rest[1+closeBracket:], "](") {
+				afterParen = rest[1+closeBracket+2:]
+				closeParen = strings.IndexByte(afterParen, ')')
+			}
+			if closeParen < 0 {
+				b.WriteString("[")
+				s = rest[1:]
+			} else {
+				b.WriteString(`<a href="`)
+				b.WriteString(html.EscapeString(afterParen[:closeParen]))
+				b.WriteString(`">`)
+				b.WriteString(html.EscapeString(rest[1 : 1+closeBracket]))
+				b.WriteString("</a>")
+				s = afterParen[closeParen+1:]
+			}
 		default: // одиночный '`' → inline-код
 			end := strings.IndexByte(rest[1:], '`')
 			if end < 0 {

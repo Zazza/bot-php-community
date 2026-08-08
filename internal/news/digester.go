@@ -165,10 +165,11 @@ func formatCandidates(items []Item) string {
 }
 
 // composeDigest парсит ответ LLM: по ведущему номеру строки находит свой кандидат и
-// подставляет ЕГО ссылку (LLM ссылки не пишет). Так ссылки всегда валидны и неизменны.
-// Строки без распознанного номера/вне диапазона пропускаются. Пусто → "".
+// подставляет ЕГО ссылку (LLM ссылки не пишет) как markdown-ссылку [🔗](url) — mdToHTML
+// превратит её в <a href>, и длинный URL будет скрыт за кликабельным 🔗. Пункты разделены
+// пустой строкой. Строки без распознанного номера/вне диапазона пропускаются. Пусто → "".
 func composeDigest(body string, cands []Item) string {
-	var b strings.Builder
+	var blocks []string
 	for _, line := range strings.Split(body, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -183,12 +184,9 @@ func composeDigest(body string, cands []Item) string {
 		if rest == "" {
 			continue
 		}
-		b.WriteString(rest)
-		b.WriteByte(' ')
-		b.WriteString(cands[idx-1].Link)
-		b.WriteByte('\n')
+		blocks = append(blocks, rest+" [🔗]("+cands[idx-1].Link+")")
 	}
-	return strings.TrimSpace(b.String())
+	return strings.Join(blocks, "\n\n")
 }
 
 // parseLeadingIndex читает ведущее целое число в строке.

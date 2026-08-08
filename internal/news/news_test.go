@@ -132,12 +132,16 @@ func TestComposeDigest(t *testing.T) {
 	// LLM выбрал пункты 2 и 1 (не по порядку), без ссылок; есть мусорная строка без номера.
 	body := "2. **PHP 8.4** — крутой релиз\n\n1. Описание первого\nмусор без номера"
 	got := composeDigest(body, cands)
-	// ссылка подставлена из кандидата по номеру, порядок как у LLM
-	if !strings.Contains(got, "**PHP 8.4** — крутой релиз https://x.com/2") {
+	// ссылка подставлена из кандидата по номеру как [🔗](url), порядок как у LLM
+	if !strings.Contains(got, "**PHP 8.4** — крутой релиз [🔗](https://x.com/2)") {
 		t.Errorf("item 2 link not composed: %s", got)
 	}
-	if !strings.Contains(got, "Описание первого https://x.com/1") {
+	if !strings.Contains(got, "Описание первого [🔗](https://x.com/1)") {
 		t.Errorf("item 1 link not composed: %s", got)
+	}
+	// между пунктами — пустая строка
+	if !strings.Contains(got, "[🔗](https://x.com/2)\n\nОписание первого") {
+		t.Errorf("items should be separated by blank line:\n%s", got)
 	}
 	if strings.Contains(got, "https://x.com/3") {
 		t.Errorf("item 3 should not appear: %s", got)
