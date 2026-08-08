@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,8 +23,10 @@ type Poster interface {
 // ручная команда /news — сообщает пользователю.
 var ErrNoNews = errors.New("no fresh news")
 
-// freshWindow — считаем свежими новости за этот период.
-const freshWindow = 7 * 24 * time.Hour
+// freshWindow — считаем свежими новости за этот период. Ежедневный вечерний дайджест:
+// 48ч держат фокус на свежем + переживают один пропущенный прогон (бот лежал сутки),
+// не захватывая «совсем старые».
+const freshWindow = 48 * time.Hour
 
 // Digester собирает PHP-дайджест: фетч фидов → дедуп → LLM-куратория → пост.
 type Digester struct {
@@ -164,43 +166,63 @@ func formatCandidates(items []Item) string {
 	return b.String()
 }
 
-// composeDigest парсит ответ LLM: по ведущему номеру строки находит свой кандидат и
-// подставляет ЕГО ссылку (LLM ссылки не пишет) как markdown-ссылку [🔗](url) — mdToHTML
-// превратит её в <a href>, и длинный URL будет скрыт за кликабельным 🔗. Пункты разделены
-// пустой строкой. Строки без распознанного номера/вне диапазона пропускаются. Пусто → "".
+// urlTokenRe — ссылка в строке ответа LLM.
+var urlTokenRe = regexp.MustCompile(`https?://\S+`)
+
+// leadingNumRe — ведущая нумерация "N. " / "N) " (контракт — не нумеровать, но защитимся:
+// при перенумерации номер всё равно не используется для привязки ссылки).
+var leadingNumRe = regexp.MustCompile(`^\s*\d+[.)]\s*`)
+
+// composeDigest парсит ответ LLM: из каждой строки достаёт ссылку и валидирует её против
+// кандидатов (в пост попадают ТОЛЬКО известные ссылки — защита от подмены/галлюцинации URL),
+// собирая блок "<описание> [🔗](url)". Ссылка едет в той же строке, что и описание, поэтому
+// перенумерация/перестановка пунктов LLM НЕ ломает привязку (в отличие от маппинга по номеру,
+// который ошибочно прицеплял ссылку cands[N-1] к чужому заголовку). Пункты разделены пустой
+// строкой. Строки без валидной ссылки из кандидатов пропускаются (fail-safe). Пусто → "".
 func composeDigest(body string, cands []Item) string {
+	allowed := make(map[string]string, len(cands)) // hashURL(link) → link
+	for _, c := range cands {
+		allowed[hashURL(c.Link)] = c.Link
+	}
 	var blocks []string
 	for _, line := range strings.Split(body, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		idx, ok := parseLeadingIndex(line)
-		if !ok || idx < 1 || idx > len(cands) {
+		raw := matchAllowedURL(line, allowed)
+		if raw == "" {
 			continue
 		}
-		rest := strings.TrimLeft(line, "0123456789")
-		rest = strings.TrimSpace(strings.TrimLeft(rest, ".)"))
-		if rest == "" {
+		desc := urlTokenRe.ReplaceAllString(line, "")            // убираем все ссылки
+		desc = strings.TrimSpace(desc)
+		desc = strings.TrimSpace(strings.TrimRight(desc, " —–-")) // висячий разделитель перед ссылкой
+		desc = leadingNumRe.ReplaceAllString(desc, "")            // LLM мог перенумеровать
+		desc = strings.TrimSpace(desc)
+		if desc == "" {
 			continue
 		}
-		blocks = append(blocks, rest+" [🔗]("+cands[idx-1].Link+")")
+		blocks = append(blocks, desc+" [🔗]("+raw+")")
 	}
 	return strings.Join(blocks, "\n\n")
 }
 
-// parseLeadingIndex читает ведущее целое число в строке.
-func parseLeadingIndex(s string) (int, bool) {
-	i := 0
-	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
-		i++
+// matchAllowedURL возвращает последнюю ссылку в строке, совпадающую (после нормализации)
+// с одним из кандидатов; иначе "". «Последняя» — т.к. по контракту ссылка стоит в конце
+// строки. Толерантна к прилипшей пунктуации вокруг URL, которую мог добавить LLM.
+func matchAllowedURL(line string, allowed map[string]string) string {
+	last := ""
+	for _, m := range urlTokenRe.FindAllString(line, -1) {
+		for u := m; ; {
+			if raw, ok := allowed[hashURL(u)]; ok {
+				last = raw
+			}
+			trimmed := strings.TrimRight(u, ".,);:!?]>'\"")
+			if trimmed == u || trimmed == "" {
+				break
+			}
+			u = trimmed
+		}
 	}
-	if i == 0 {
-		return 0, false
-	}
-	n, err := strconv.Atoi(s[:i])
-	if err != nil || n <= 0 {
-		return 0, false
-	}
-	return n, true
+	return last
 }

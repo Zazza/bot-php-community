@@ -129,54 +129,42 @@ func TestComposeDigest(t *testing.T) {
 		{Source: src, Title: "second", Link: "https://x.com/2"},
 		{Source: src, Title: "third", Link: "https://x.com/3"},
 	}
-	// LLM выбрал пункты 2 и 1 (не по порядку), без ссылок; есть мусорная строка без номера.
-	body := "2. **PHP 8.4** — крутой релиз\n\n1. Описание первого\nмусор без номера"
+	// Регрессия бага «битые ссылки»: LLM оставил ссылку в конце строки, переставил
+	// пункты (сначала #2, потом #1) и ПЕРЕНУМЕРОВАЛ их (1., 2.), подсунул чужую ссылку
+	// и строку без ссылки. Привязка идёт по URL в строке, а не по номеру → заголовок
+	// получает СВОЮ ссылку даже после перенумерации; чужая/отсутствующая — отбрасываются.
+	body := "1. **PHP 8.4** — крутой релиз https://x.com/2\n\n" +
+		"2. Описание первого https://x.com/1\n" +
+		"левак с подменной ссылкой https://evil.com/x\n" +
+		"строка вообще без ссылки"
 	got := composeDigest(body, cands)
-	// ссылка подставлена из кандидата по номеру как [🔗](url), порядок как у LLM
 	if !strings.Contains(got, "**PHP 8.4** — крутой релиз [🔗](https://x.com/2)") {
-		t.Errorf("item 2 link not composed: %s", got)
+		t.Errorf("item should keep ITS url despite LLM renumbering:\n%s", got)
 	}
 	if !strings.Contains(got, "Описание первого [🔗](https://x.com/1)") {
-		t.Errorf("item 1 link not composed: %s", got)
+		t.Errorf("item should keep ITS url:\n%s", got)
 	}
-	// между пунктами — пустая строка
 	if !strings.Contains(got, "[🔗](https://x.com/2)\n\nОписание первого") {
 		t.Errorf("items should be separated by blank line:\n%s", got)
 	}
-	if strings.Contains(got, "https://x.com/3") {
-		t.Errorf("item 3 should not appear: %s", got)
+	if strings.Contains(got, "evil.com") {
+		t.Errorf("non-candidate URL must NOT leak into post:\n%s", got)
 	}
-	if strings.Contains(got, "мусор") {
-		t.Errorf("garbage line should be dropped: %s", got)
+	if strings.Contains(got, "без ссылки") {
+		t.Errorf("linkless line should be dropped:\n%s", got)
+	}
+	if strings.Contains(got, "https://x.com/3") {
+		t.Errorf("unselected item 3 should not appear:\n%s", got)
 	}
 }
 
 func TestComposeDigestEmptyOnGarbage(t *testing.T) {
 	cands := []Item{{Link: "https://x.com/1"}}
-	if got := composeDigest("no numbers here at all", cands); got != "" {
-		t.Errorf("expected empty, got %q", got)
+	if got := composeDigest("вообще без ссылок", cands); got != "" {
+		t.Errorf("no URL → expected empty, got %q", got)
 	}
-	if got := composeDigest("99. out of range", cands); got != "" {
-		t.Errorf("out-of-range index should yield empty, got %q", got)
-	}
-}
-
-func TestParseLeadingIndex(t *testing.T) {
-	cases := []struct {
-		in   string
-		ok   bool
-		want int
-	}{
-		{"3. text", true, 3},
-		{"12) text", true, 12},
-		{"nope", false, 0},
-		{"0. zero", false, 0},
-	}
-	for _, c := range cases {
-		got, ok := parseLeadingIndex(c.in)
-		if ok != c.ok || got != c.want {
-			t.Errorf("parseLeadingIndex(%q) = (%d,%v), want (%d,%v)", c.in, got, ok, c.want, c.ok)
-		}
+	if got := composeDigest("desc https://not-a-candidate.com", cands); got != "" {
+		t.Errorf("non-candidate URL → expected empty, got %q", got)
 	}
 }
 
