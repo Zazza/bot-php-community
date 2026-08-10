@@ -10,6 +10,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"phpbot/internal/llm"
+	"unicode/utf16"
 )
 
 // Quiz — домен викторины: генерит вопрос, постит с кнопками, обрабатывает ответы.
@@ -52,39 +53,42 @@ func (q *Quiz) Post(ctx context.Context, chatID int64) error {
 }
 
 // HandleQuizCallback обрабатывает тап по варианту: учитывает голос (один на юзера),
-// мгновенно отвечает тостом ✅/❌ и обновляет live-tally на сообщении. Возвращает текст тоста.
-func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery) string {
+// отвечает тостом ✅/❌ и обновляет live-tally на сообщении. «Показать ответ» отвечает
+// модальным алертом — он виден ТОЛЬКО нажавшему, не срывает голосование и не исчезает
+// сам (в отличие от тоста). Возвращает (текст, showAlert). Текст капируется ≤200 UTF-16
+// — лимит Telegram answerCallbackQuery; при превышении алерт молча не покажется.
+func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery) (string, bool) {
 	parts := strings.Split(cb.Data, ":") // quiz:<id>:<opt>
 	if len(parts) != 3 {
-		return ""
+		return "", false
 	}
 	id, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil {
-		return "Некорректная кнопка"
+		return "Некорректная кнопка", false
 	}
 	row, err := q.repo.Get(ctx, id)
 	if err != nil || row == nil {
-		return "Вопрос уже не активен"
+		return "Вопрос уже не активен", false
 	}
 
-	// «Показать ответ»: ответ виден ТОЛЬКО нажавшему (приватный тост). Сообщение не
-	// меняем, кнопки не снимаем, голосование не срываем — один человек не раскрывает ответ всем.
+	// «Показать ответ»: модальный алерт (showAlert=true) виден ТОЛЬКО нажавшему. Сообщение
+	// не меняем, кнопки не снимаем, голосование не срываем — один человек не раскрывает ответ всем.
 	if parts[2] == "r" {
 		counts, _ := q.repo.BallotCounts(ctx, id)
-		return revealToast(row, counts)
+		return capAlert(revealToast(row, counts)), true
 	}
 
 	choice, err := strconv.Atoi(parts[2])
 	if err != nil || choice < 0 || choice > 3 {
-		return "Некорректная кнопка"
+		return "Некорректная кнопка", false
 	}
 
 	isNew, err := q.repo.RecordBallot(ctx, id, cb.From.ID, choice)
 	if err != nil {
-		return "Ошибка, попробуй ещё"
+		return "Ошибка, попробуй ещё", false
 	}
 	if !isNew {
-		return "Ты уже отвечал 🙂"
+		return "Ты уже отвечал 🙂", false
 	}
 
 	letters := "ABCD"
@@ -113,7 +117,7 @@ func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery)
 			slog.Warn("quiz tally edit", "err", eerr)
 		}
 	}
-	return toast
+	return capAlert(toast), false
 }
 
 // renderQuestion собирает текст вопроса с вариантами и (если есть голоса) live-tally.
@@ -154,6 +158,33 @@ func revealToast(row *Row, counts map[int]int) string {
 	}
 	return s
 }
+
+// alertMaxUTF16 — лимит Telegram answerCallbackQuery: text 0–200, считаются UTF-16
+// code units (эмодзи = 2). Превышение → 400, алерт/тост молча не покажется.
+const alertMaxUTF16 = 200
+
+// capAlert ужимает текст алерта/тоста до лимита answerCallbackQuery, добавляя «…».
+// В revealToast и тосте ответа верный вариант идёт ВНАЧАЛЕ — он не обрезается, под
+// нож идёт только хвост длинного пояснения.
+func capAlert(s string) string {
+	if utf16Len(s) <= alertMaxUTF16 {
+		return s
+	}
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		cost := utf16Len(string(r))
+		if n+cost+1 > alertMaxUTF16 { // +1 — место под «…»
+			break
+		}
+		b.WriteRune(r)
+		n += cost
+	}
+	return b.String() + "…"
+}
+
+// utf16Len возвращает длину строки в UTF-16 code units (как считает Telegram).
+func utf16Len(s string) int { return len(utf16.Encode([]rune(s))) }
 
 // quizKeyboard строит inline-кнопки вариантов. callback_data: quiz:<id>:<opt index>.
 func quizKeyboard(quizID int64, opts []string) models.InlineKeyboardMarkup {

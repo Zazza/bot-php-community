@@ -237,10 +237,10 @@ func (h *Handlers) OnCallbackQuery(ctx context.Context, b *bot.Bot, upd *models.
 		return
 	}
 	if strings.HasPrefix(cb.Data, "quiz:") && h.quiz != nil {
-		alert := h.quiz.HandleQuizCallback(ctx, cb)
-		if alert != "" {
+		text, showAlert := h.quiz.HandleQuizCallback(ctx, cb)
+		if text != "" {
 			_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
-				CallbackQueryID: cb.ID, Text: alert,
+				CallbackQueryID: cb.ID, Text: text, ShowAlert: showAlert,
 			})
 		}
 		return
