@@ -318,7 +318,7 @@ func composeArticles(body string, cands []Item) (string, []string) {
 		}
 		clean := urlTokenRe.ReplaceAllString(line, "")
 		clean = strings.TrimSpace(clean)
-		clean = strings.TrimSpace(strings.TrimRight(clean, " —–-"))
+		clean = strings.TrimSpace(strings.TrimRight(clean, " —–-<>"))
 		clean = leadingNumRe.ReplaceAllString(clean, "")
 		clean = strings.TrimSpace(clean)
 		if clean == "" {
@@ -368,7 +368,7 @@ func composePackages(body string, cands []Item) (string, []string) {
 		}
 		clean := urlTokenRe.ReplaceAllString(line, "")
 		clean = strings.TrimSpace(clean)
-		clean = strings.TrimSpace(strings.TrimRight(clean, " —–-"))
+		clean = strings.TrimSpace(strings.TrimRight(clean, " —–-<>"))
 		clean = leadingNumRe.ReplaceAllString(clean, "")
 		clean = strings.TrimSpace(clean)
 		if clean == "" {

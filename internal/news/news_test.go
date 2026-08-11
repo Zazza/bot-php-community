@@ -511,3 +511,40 @@ func TestComposePackagesSanitizesBrackets(t *testing.T) {
 		t.Errorf("package line missing or wrapper broken; got:\n%s", text)
 	}
 }
+
+// TestComposePackagesStripsAngleWrapper — регресс 2026-08-10: промпт требует
+// «vendor/package — описание <ССЫЛКА>», LLM оборачивает ссылку в <…>, артефактная «<»
+// оставалась хвостом описания («…клиент для мониторинга Laravel <»). Чистка срезает <>.
+func TestComposePackagesStripsAngleWrapper(t *testing.T) {
+	src := Source{Name: "s", URL: "u", Category: "package"}
+	cands := []Item{{Source: src, Title: "a", Link: "https://packagist.org/packages/marekmiklusek/laravel-monitor-client"}}
+	body := "marekmiklusek/laravel-monitor-client — клиент для мониторинга Laravel <https://packagist.org/packages/marekmiklusek/laravel-monitor-client>"
+	text, used := composePackages(body, cands)
+	if strings.Contains(text, "<") || strings.Contains(text, ">") {
+		t.Errorf("stray angle bracket leaked into package line: %q", text)
+	}
+	want := "• [marekmiklusek/laravel-monitor-client](https://packagist.org/packages/marekmiklusek/laravel-monitor-client) — клиент для мониторинга Laravel"
+	if !strings.Contains(text, want) {
+		t.Errorf("package line wrong; got:\n%s", text)
+	}
+	if len(used) != 1 || used[0] != cands[0].Link {
+		t.Errorf("used = %v, want [%s]", used, cands[0].Link)
+	}
+}
+
+// TestComposeArticlesStripsAngleWrapper — то же для секции статей: описание без хвостовой «<».
+func TestComposeArticlesStripsAngleWrapper(t *testing.T) {
+	src := Source{Name: "s", URL: "u", Category: "hub"}
+	cands := []Item{{Source: src, Title: "a", Link: "https://x.com/2"}}
+	body := "**Laravel против Next.js** — обсуждение сравнения технологий <https://x.com/2>"
+	text, used := composeArticles(body, cands)
+	if strings.Contains(text, "<") || strings.Contains(text, ">") {
+		t.Errorf("stray angle bracket leaked into article block: %q", text)
+	}
+	if !strings.Contains(text, "[Laravel против Next.js](https://x.com/2)\nобсуждение сравнения технологий") {
+		t.Errorf("article block wrong; got:\n%s", text)
+	}
+	if len(used) != 1 || used[0] != cands[0].Link {
+		t.Errorf("used = %v, want [%s]", used, cands[0].Link)
+	}
+}
