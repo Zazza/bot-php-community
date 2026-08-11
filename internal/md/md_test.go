@@ -1,8 +1,8 @@
-package tg
+package md
 
 import "testing"
 
-func TestMdToHTML(t *testing.T) {
+func TestToHTML(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
@@ -28,8 +28,8 @@ func TestMdToHTML(t *testing.T) {
 		{"bracket then real link", "[x] then [y](https://z.com)", "[x] then <a href=\"https://z.com\">y</a>"},
 	}
 	for _, c := range cases {
-		if got := mdToHTML(c.in); got != c.want {
-			t.Errorf("%s:\n mdToHTML(%q)\n   = %q\n want %q", c.name, c.in, got, c.want)
+		if got := ToHTML(c.in); got != c.want {
+			t.Errorf("%s:\n ToHTML(%q)\n   = %q\n want %q", c.name, c.in, got, c.want)
 		}
 	}
 }

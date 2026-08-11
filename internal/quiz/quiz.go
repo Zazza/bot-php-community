@@ -10,6 +10,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"phpbot/internal/llm"
+	"phpbot/internal/md"
 	"unicode/utf16"
 )
 
@@ -37,7 +38,9 @@ func (q *Quiz) Post(ctx context.Context, chatID int64) error {
 		return err
 	}
 	sent, err := q.api.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: chatID, Text: renderQuestion(qn.Prompt, qn.Opts, 0, 0),
+		ChatID:      chatID,
+		Text:        md.ToHTML(renderQuestion(qn.Prompt, qn.Opts, 0, 0)),
+		ParseMode:   models.ParseModeHTML,
 		ReplyMarkup: quizKeyboard(id, qn.Opts),
 	})
 	if err != nil {
@@ -110,8 +113,10 @@ func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery)
 	if row.MessageID != 0 {
 		kb := quizKeyboard(id, row.Opts())
 		if _, eerr := q.api.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID: row.ChatID, MessageID: int(row.MessageID),
-			Text:        renderQuestion(row.Question, row.Opts(), total, correct),
+			ChatID:      row.ChatID,
+			MessageID:   int(row.MessageID),
+			Text:        md.ToHTML(renderQuestion(row.Question, row.Opts(), total, correct)),
+			ParseMode:   models.ParseModeHTML,
 			ReplyMarkup: &kb,
 		}); eerr != nil {
 			slog.Warn("quiz tally edit", "err", eerr)
