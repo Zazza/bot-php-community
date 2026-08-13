@@ -14,6 +14,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"phpbot/internal/anniv"
+	"phpbot/internal/announce"
 	"phpbot/internal/chat"
 	"phpbot/internal/config"
 	"phpbot/internal/db"
@@ -133,12 +134,15 @@ func main() {
 	newsRepo := news.NewRepository(dbx)
 	newsDigester := news.NewDigester(llmCheap, newsRepo, poster, cfg.ChatIDs, news.DefaultSources())
 
+	announceSvc := announce.New(b, cfg.AdminIDs, cfg.ChatIDs[0])
+
 	handlers := tg.NewHandlers(tg.HandlersDeps{
 		API: b, ChatIDs: cfg.ChatIDs, BotUserID: me.ID,
 		Moderation: moderFlow, Spam: spamFilter, Vote: voteKick,
 		Users: userRepo, Msgs: msgRepo, Vec: vecRepo,
 		Answerer: answerer, Digester: digester,
 		FAQ: faqRepo, FAQBuilder: faqBuilder, Quiz: quizSvc, News: newsDigester,
+		Announce: announceSvc,
 	})
 	handlers.SetBotUsername(me.Username)
 

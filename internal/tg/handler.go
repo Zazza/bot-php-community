@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"phpbot/internal/announce"
 	"phpbot/internal/chat"
 	"phpbot/internal/faq"
 	"phpbot/internal/messages"
@@ -57,6 +58,7 @@ type Handlers struct {
 	faqBuilder *faq.Builder
 	quiz       *quiz.Quiz
 	news       *news.Digester
+	announce   *announce.Service
 }
 
 // HandlersDeps — зависимости для сборки Handlers.
@@ -76,6 +78,7 @@ type HandlersDeps struct {
 	FAQBuilder *faq.Builder
 	Quiz       *quiz.Quiz
 	News       *news.Digester
+	Announce   *announce.Service
 }
 
 // NewHandlers собирает Handlers.
@@ -95,6 +98,7 @@ func NewHandlers(d HandlersDeps) *Handlers {
 		faqBuilder: d.FAQBuilder,
 		quiz:       d.Quiz,
 		news:       d.News,
+		announce:   d.Announce,
 		chatIDs:    make(map[int64]struct{}, len(d.ChatIDs)),
 	}
 	for _, id := range d.ChatIDs {
@@ -158,6 +162,10 @@ func (h *Handlers) OnMessage(ctx context.Context, b *bot.Bot, upd *models.Update
 		}
 		if cmd, args := extractCommand(pt); cmd != "" {
 			h.dispatchCommand(ctx, msg.Chat.ID, h.primaryChatID, msg, cmd, args)
+			return
+		}
+		// Режим ввода анонса (/announce): следующее сообщение становится текстом анонса.
+		if h.announce != nil && h.announce.ConsumeText(ctx, msg.From.ID, pt, msg.Chat.ID) {
 			return
 		}
 		h.pmAnswer(ctx, msg)
@@ -245,6 +253,16 @@ func (h *Handlers) OnCallbackQuery(ctx context.Context, b *bot.Bot, upd *models.
 		}
 		return
 	}
+	if strings.HasPrefix(cb.Data, "announce:") && h.announce != nil {
+		alert := h.announce.HandleCallback(ctx, cb)
+		if alert == "" {
+			alert = "—"
+		}
+		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+			CallbackQueryID: cb.ID, Text: alert,
+		})
+		return
+	}
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
 		CallbackQueryID: cb.ID, Text: "—",
 	})
@@ -282,6 +300,10 @@ func (h *Handlers) dispatchCommand(ctx context.Context, replyChatID, dataChatID 
 		h.cmdQuiz(ctx, replyChatID, dataChatID, msg)
 	case "news":
 		h.cmdNews(ctx, replyChatID, dataChatID, msg)
+	case "announce":
+		h.cmdAnnounce(ctx, replyChatID, msg)
+	case "cancel":
+		h.cmdCancelAnnounce(ctx, replyChatID, msg)
 	default:
 		slog.Debug("unknown command", "cmd", cmd)
 	}
@@ -309,6 +331,7 @@ func (h *Handlers) cmdHelp(ctx context.Context, replyChatID int64) {
 /kick @user — кик пользователя
 /quiz — запостить вопрос викторины
 /news — PHP-новости недели (релизы/пакеты/обсуждения)
+/announce (в личке боту) — анонс митапа со сбором спикеров
 
 *Для всех:*
 /report (reply на сообщение или @user) — голосование за изгнание
@@ -419,6 +442,31 @@ func (h *Handlers) cmdNews(ctx context.Context, replyChatID, dataChatID int64, m
 			}
 		}
 	}()
+}
+
+// cmdAnnounce — запуск ввода анонса митапа. Доступен только из ЛС админа; в группе и от
+// не-админов молча игнорируется. Сам текст анонса принимает ConsumeText (следующее сообщение).
+func (h *Handlers) cmdAnnounce(ctx context.Context, replyChatID int64, msg *models.Message) {
+	if msg.Chat.Type != "private" || msg.From == nil || !h.moderation.IsAdmin(msg.From.ID) {
+		return
+	}
+	if h.announce == nil {
+		return
+	}
+	h.announce.Start(ctx, replyChatID, msg.From.ID)
+}
+
+// cmdCancelAnnounce — сброс режима ввода анонса (/cancel в личке).
+func (h *Handlers) cmdCancelAnnounce(ctx context.Context, replyChatID int64, msg *models.Message) {
+	if msg.Chat.Type != "private" || msg.From == nil || !h.moderation.IsAdmin(msg.From.ID) {
+		return
+	}
+	if h.announce == nil {
+		return
+	}
+	if h.announce.Cancel(msg.From.ID) {
+		_ = SendMessage(ctx, h.api, replyChatID, announce.CancelText)
+	}
 }
 
 // pluralYears — склонение «год/года/лет».
