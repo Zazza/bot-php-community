@@ -1,0 +1,43 @@
+name: healthcheck
+
+# Ручная проверка здоровья прода: состояние контейнеров, счётчик рестартов,
+# последние логи бота. Не деплоит и ничего не меняет — только чтение.
+# Запуск: gh workflow run healthcheck.yml (или Actions → Run workflow).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  healthcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Prod healthcheck (read-only)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          ssh -i ~/.ssh/id_ed25519 \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=30 \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "set -euo pipefail
+               cd /srv/php-bot
+               echo '=== git HEAD ==='
+               git log --oneline -1
+               echo '=== compose ps ==='
+               docker compose ps
+               echo '=== bot container state ==='
+               docker inspect php-bot --format 'status={{.State.Status}} restarts={{.RestartCount}} started={{.State.StartedAt}}'
+               echo '=== bot logs (tail 60) ==='
+               docker compose logs --tail 60 bot"
+          rm -f ~/.ssh/id_ed25519
