@@ -31,30 +31,43 @@ const freshWindow = 48 * time.Hour
 
 // Digester собирает PHP-дайджест: фетч фидов → дедуп → LLM-куратория → пост.
 type Digester struct {
-	sources []Source
-	llm     *llm.LLMClient
-	repo    *Repository
-	api     Poster
-	chatIDs []int64
-	cron    *cron.Cron
+	sources     []Source
+	llm         *llm.LLMClient
+	repo        *Repository
+	api         Poster
+	chatIDs     []int64
+	cron        *cron.Cron
+	fakeEnabled bool
 }
 
-// NewDigester создаёт Digester. sources=nil → DefaultSources.
-func NewDigester(llm *llm.LLMClient, repo *Repository, api Poster, chatIDs []int64, sources []Source) *Digester {
+// NewDigester создаёт Digester. sources=nil → DefaultSources. fakeEnabled — пятничная
+// рубрика «выпуск, которого не было» (LLM-пародия) вместо обычного дайджеста по пятницам.
+func NewDigester(llm *llm.LLMClient, repo *Repository, api Poster, chatIDs []int64, sources []Source, fakeEnabled bool) *Digester {
 	if len(sources) == 0 {
 		sources = DefaultSources()
 	}
-	return &Digester{sources: sources, llm: llm, repo: repo, api: api, chatIDs: chatIDs}
+	return &Digester{sources: sources, llm: llm, repo: repo, api: api, chatIDs: chatIDs, fakeEnabled: fakeEnabled}
 }
 
 // Start регистрирует пост дайджеста (по умолчанию ежедневно 19:00) и запускает cron.
 func (d *Digester) Start(ctx context.Context, spec string) error {
 	c := cron.New()
 	_, err := c.AddFunc(spec, func() {
-		bg, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		// 6 минут: пятница worst-case = фейк-вызов (90s) + fallback на обычный пост
+		// (фетч фидов + два LLM-вызова секций по 90s) — 240s не покрывали.
+		bg, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 		defer cancel()
 		for _, chatID := range d.chatIDs {
-			if err := d.Post(bg, chatID); err != nil {
+			var err error
+			if d.fakeEnabled && isFridaySlot(time.Now()) {
+				if ferr := d.PostFake(bg, chatID); ferr != nil {
+					slog.Warn("fake news failed, fallback to regular", "chat_id", chatID, "err", ferr)
+					err = d.Post(bg, chatID)
+				}
+			} else {
+				err = d.Post(bg, chatID)
+			}
+			if err != nil {
 				if errors.Is(err, ErrNoNews) {
 					slog.Debug("news digest skipped", "chat_id", chatID, "err", err)
 				} else {

@@ -214,7 +214,7 @@ func (h *Handlers) OnMessage(ctx context.Context, b *bot.Bot, upd *models.Update
 
 		// 3c. PHP-триггеры: @упоминание бота или reply на сообщение бота.
 		if h.isAddressedToBot(msg, text) {
-			h.answerChat(ctx, chatID, chatID, msg, stripBotMention(text, h.botUserID))
+			h.answerChat(ctx, chatID, chatID, msg, stripBotMention(text, h.botUserID), false)
 		}
 	}
 }
@@ -273,7 +273,7 @@ func (h *Handlers) OnCallbackQuery(ctx context.Context, b *bot.Bot, upd *models.
 func (h *Handlers) dispatchCommand(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, cmd, args string) {
 	switch cmd {
 	case "ask":
-		h.answerChat(ctx, replyChatID, dataChatID, msg, args)
+		h.answerChat(ctx, replyChatID, dataChatID, msg, args, true)
 	case "search":
 		h.cmdSearch(ctx, replyChatID, dataChatID, args)
 	case "expert":
@@ -314,7 +314,7 @@ func (h *Handlers) dispatchCommand(ctx context.Context, replyChatID, dataChatID 
 func (h *Handlers) cmdHelp(ctx context.Context, replyChatID int64) {
 	text := `*Команды бота*
 
-/ask <вопрос> — ответ на PHP/IT-вопрос
+/ask <вопрос> — ответ на PHP/IT-вопрос (история чата + свежее из веба)
 /search <запрос> — поиск по истории чата
 /expert <тема> — к кому обратиться по теме
 /stats — статистика чата
@@ -336,7 +336,7 @@ func (h *Handlers) cmdHelp(ctx context.Context, replyChatID int64) {
 *Для всех:*
 /report (reply на сообщение или @user) — голосование за изгнание
 
-Бот также отвечает на @упоминание и reply на своё сообщение.`
+Бот также отвечает на @упоминание и reply на своё сообщение — но только по истории чата (если тема обсуждалась).`
 	_ = SendMessage(ctx, h.api, replyChatID, text)
 }
 
@@ -420,6 +420,7 @@ func (h *Handlers) cmdQuiz(ctx context.Context, replyChatID, dataChatID int64, m
 // cmdNews — админский запуск PHP-дайджеста. Постит туда, где вызван: в группе → в группу,
 // в ЛС → приватный превью админу (дедуп news_posted привязан к chat_id, поэтому превью в ЛС
 // не «съедает» недельные новости группы). dataChatID не используется (новости — внешний контент).
+// args="fake" — ручной запуск пятничного выпуска (без fallback на обычный дайджест).
 func (h *Handlers) cmdNews(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message) {
 	if msg.From == nil || !h.moderation.IsAdmin(msg.From.ID) {
 		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
@@ -427,6 +428,21 @@ func (h *Handlers) cmdNews(ctx context.Context, replyChatID, dataChatID int64, m
 	}
 	if h.news == nil {
 		_ = SendMessage(ctx, h.api, replyChatID, "PHP-новости выключены.")
+		return
+	}
+	_, args := extractCommand(msg.Text)
+	// Первый токен регистронезависимо: "/news FAKE", "/news Fake погнали" — тоже рубрика.
+	if fs := strings.Fields(args); len(fs) > 0 && strings.EqualFold(fs[0], "fake") {
+		_ = SendMessage(ctx, h.api, replyChatID, "🎰 Собираю пятничный выпуск...")
+		go func() {
+			// 2 минуты: LLM HTTP-таймаут 90s + запас на постинг (replyTimeout впритык).
+			ctxBg, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			if err := h.news.PostFake(ctxBg, replyChatID); err != nil {
+				slog.Error("fake news post", "err", err)
+				_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось собрать пятничный выпуск: "+err.Error())
+			}
+		}()
 		return
 	}
 	_ = SendMessage(ctx, h.api, replyChatID, "⏳ Собираю PHP-новости недели...")
@@ -740,7 +756,9 @@ func (h *Handlers) cmdDigest(ctx context.Context, replyChatID, dataChatID int64,
 	}
 	_ = SendMessage(ctx, h.api, replyChatID, "⏳ Собираю дайджест "+p.label+"...")
 	go func(replyChatID, dataChatID int64, start, end time.Time, label string) {
-		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
+		// Неделя = два последовательных LLM-вызова (основа + ретро) по 90с worst case
+		// каждый: replyTimeout (90с) их не покрывает, берём собственный бюджет (как cron).
+		ctxBg, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cancel()
 		if err := h.digester.PostDigest(ctxBg, dataChatID, replyChatID, start, end); err != nil {
 			if errors.Is(err, topics.ErrTooFewMessages) {
@@ -1079,7 +1097,9 @@ func enrichQuestion(question string, msg *models.Message, botUserID int64) strin
 }
 
 // answerChat вызывает answerer (контекст из dataChatID) и шлёт ответ в replyChatID.
-func (h *Handlers) answerChat(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, question string) {
+// explicit=true (/ask) — AnswerAsk: ответ гарантирован (история+веб+знания);
+// false (упоминание/reply) — Answer: история-only, пустой ответ = молчание.
+func (h *Handlers) answerChat(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, question string, explicit bool) {
 	question = enrichQuestion(strings.TrimSpace(question), msg, h.botUserID)
 	if question == "" {
 		_ = SendMessage(ctx, h.api, replyChatID, "Спроси что-нибудь конкретнее 🙂")
@@ -1088,7 +1108,14 @@ func (h *Handlers) answerChat(ctx context.Context, replyChatID, dataChatID int64
 	go func() {
 		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
 		defer cancel()
-		resp, err := h.answerer.Answer(ctxBg, dataChatID, replyUsername(msg.From), question)
+		asker := replyUsername(msg.From)
+		var resp string
+		var err error
+		if explicit {
+			resp, err = h.answerer.AnswerAsk(ctxBg, dataChatID, asker, question)
+		} else {
+			resp, err = h.answerer.Answer(ctxBg, dataChatID, asker, question)
+		}
 		if err != nil {
 			slog.Error("answer chat", "err", err)
 			_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось получить ответ, попробуй позже.")
@@ -1126,7 +1153,7 @@ func (h *Handlers) pmAnswer(ctx context.Context, msg *models.Message) {
 	go func() {
 		ctxBg, cancel := context.WithTimeout(context.Background(), replyTimeout)
 		defer cancel()
-		resp, err := h.answerer.Answer(ctxBg, h.primaryChatID, asker, q)
+		resp, err := h.answerer.AnswerAsk(ctxBg, h.primaryChatID, asker, q)
 		if err != nil {
 			slog.Error("pm answer", "err", err)
 			_ = SendMessage(ctxBg, h.api, msg.Chat.ID, "Не удалось получить ответ, попробуй позже.")
@@ -1158,7 +1185,7 @@ func (h *Handlers) classifyInBackground(in moderation.SpamInput, reason string, 
 		defer saveCancel()
 		h.saveMessage(saveCtx, msg, in.Text)
 		if h.isAddressedToBot(msg, in.Text) {
-			h.answerChat(saveCtx, chatID, chatID, msg, stripBotMention(in.Text, h.botUserID))
+			h.answerChat(saveCtx, chatID, chatID, msg, stripBotMention(in.Text, h.botUserID), false)
 		}
 	}()
 }

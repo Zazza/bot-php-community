@@ -21,8 +21,8 @@ import (
 	"phpbot/internal/faq"
 	"phpbot/internal/llm"
 	"phpbot/internal/messages"
-	"phpbot/internal/news"
 	"phpbot/internal/moderation"
+	"phpbot/internal/news"
 	"phpbot/internal/prompts"
 	"phpbot/internal/quiz"
 	"phpbot/internal/tg"
@@ -132,7 +132,7 @@ func main() {
 	annivSched := anniv.New(msgRepo, llmClient, poster, cfg.ChatIDs)
 
 	newsRepo := news.NewRepository(dbx)
-	newsDigester := news.NewDigester(llmCheap, newsRepo, poster, cfg.ChatIDs, news.DefaultSources())
+	newsDigester := news.NewDigester(llmCheap, newsRepo, poster, cfg.ChatIDs, news.DefaultSources(), cfg.FakeNewsEnabled)
 
 	announceSvc := announce.New(b, cfg.AdminIDs, cfg.ChatIDs[0])
 

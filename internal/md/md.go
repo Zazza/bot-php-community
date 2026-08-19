@@ -4,6 +4,7 @@ package md
 import (
 	"html"
 	"strings"
+	"unicode/utf16"
 )
 
 // ToHTML переводит подмножество markdown в Telegram HTML: fenced ```code```, inline `code`,
@@ -91,3 +92,7 @@ func ToHTML(s string) string {
 	}
 	return b.String()
 }
+
+// UTF16Len — длина строки в UTF-16 code units (единица лимитов Telegram):
+// символы вне BMP (эмодзи) занимают 2. Каноническая реализация для всех пакетов.
+func UTF16Len(s string) int { return len(utf16.Encode([]rune(s))) }

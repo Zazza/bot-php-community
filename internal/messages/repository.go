@@ -97,6 +97,17 @@ func (r *Repository) CountSince(ctx context.Context, chatID int64, since time.Ti
 	return n, nil
 }
 
+// CountBetween возвращает число сообщений чата за период [from, to).
+func (r *Repository) CountBetween(ctx context.Context, chatID int64, from, to time.Time) (int, error) {
+	var n int
+	if err := r.db.GetContext(ctx, &n, `
+		SELECT count(*) FROM messages WHERE chat_id = $1 AND ts >= $2 AND ts < $3
+	`, chatID, from, to); err != nil {
+		return 0, fmt.Errorf("count between: %w", err)
+	}
+	return n, nil
+}
+
 // CountByUser возвращает число сообщений участника в чате (не больше limit — capped-count,
 // чтобы для ветерана с тысячами сообщений скан ограничивался limit строками). limit<=0 — без
 // лимита. Источник at-risk-порога анти-спама: мало сообщений → полная LLM-классификация.

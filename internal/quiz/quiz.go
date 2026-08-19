@@ -11,7 +11,6 @@ import (
 	"github.com/go-telegram/bot/models"
 	"phpbot/internal/llm"
 	"phpbot/internal/md"
-	"unicode/utf16"
 )
 
 // Quiz — домен викторины: генерит вопрос, постит с кнопками, обрабатывает ответы.
@@ -189,7 +188,7 @@ func capAlert(s string) string {
 }
 
 // utf16Len возвращает длину строки в UTF-16 code units (как считает Telegram).
-func utf16Len(s string) int { return len(utf16.Encode([]rune(s))) }
+func utf16Len(s string) int { return md.UTF16Len(s) }
 
 // quizKeyboard строит inline-кнопки вариантов. callback_data: quiz:<id>:<opt index>.
 func quizKeyboard(quizID int64, opts []string) models.InlineKeyboardMarkup {

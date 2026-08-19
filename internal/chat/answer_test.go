@@ -22,6 +22,21 @@ func TestIsSkip(t *testing.T) {
 	}
 }
 
+func TestSkipReply(t *testing.T) {
+	cases := []struct {
+		explicit bool
+		want     string
+	}{
+		{true, "🤷 Ничего полезного не нашёл — ни в истории чата, ни в вебе."},
+		{false, ""},
+	}
+	for _, c := range cases {
+		if got := skipReply(c.explicit); got != c.want {
+			t.Fatalf("skipReply(%v) = %q, want %q", c.explicit, got, c.want)
+		}
+	}
+}
+
 func TestSourceLink(t *testing.T) {
 	cases := []struct {
 		chatID, msgID int64

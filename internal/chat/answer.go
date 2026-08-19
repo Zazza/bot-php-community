@@ -23,7 +23,7 @@ const (
 	aboutMaxChars           = 12000 // бюджет на сборку сообщений для портрета участника
 	alreadyDiscussedMaxDist = 0.18  // косинусное расстояние: меньше → строже; 0.18 ≈ сходство 0.82
 	faqMatchMaxDist         = 0.20  // курируемый FAQ отдаётся сразу при расстоянии вопроса ниже порога
-	ragMinLen               = 60   // мин. длина сообщения для RAG /ask: короткий мусор (30–40 символов) не должен обгонять по косинусу содержательные сообщения в top-K
+	ragMinLen               = 60    // мин. длина сообщения для RAG /ask: короткий мусор (30–40 символов) не должен обгонять по косинусу содержательные сообщения в top-K
 )
 
 // Answerer собирает контекст (RAG + последние сообщения + веб) и зовёт LLM.
@@ -40,8 +40,19 @@ func New(llm *llm.LLMClient, msgs *messages.Repository, vec *messages.VectorRepo
 	return &Answerer{llm: llm, msgs: msgs, vec: vec, web: web, faq: faqRepo}
 }
 
-// Answer генерирует ответ на вопрос в контексте чата.
+// Answer генерирует ответ на пассивный триггер (упоминание/reply): только история чата,
+// SKIP → пустой ответ (молчание).
 func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question string) (string, error) {
+	return a.answer(ctx, chatID, asker, question, false)
+}
+
+// AnswerAsk генерирует ответ на явный вопрос (/ask, ЛС): история + веб + собственные
+// знания; молчание запрещено — SKIP превращается в фиксированный отбой.
+func (a *Answerer) AnswerAsk(ctx context.Context, chatID int64, asker, question string) (string, error) {
+	return a.answer(ctx, chatID, asker, question, true)
+}
+
+func (a *Answerer) answer(ctx context.Context, chatID int64, asker, question string, explicit bool) (string, error) {
 	q := strings.TrimSpace(question)
 	if q == "" {
 		return "Вопрос пустой.", nil
@@ -85,7 +96,8 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 	// требует «отвечать только из контекста, иначе SKIP»), а crude-порог 0.50 рубил
 	// реальные серые совпадения и плодил ложные «не обсуждали» (особенно в ЛС). Только
 	// если embed упал (нет вектора → RAG невозможен) — отбой как transient-ошибка.
-	if qvec == nil {
+	// Явный /ask при падении embed продолжает без RAG: веб + свежие + собственные знания.
+	if qvec == nil && !explicit {
 		slog.Info("chat skip: embed failed", "chat_id", chatID)
 		return "", nil // embed упал — RAG невозможен, промолчим
 	}
@@ -109,7 +121,11 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 
 	// 4. Сборка контекста.
 	contextBlock := buildContextBlock(rag, recent, web)
-	system := prompts.Get(prompts.Chat, contextBlock)
+	promptName := prompts.Chat
+	if explicit {
+		promptName = prompts.Ask
+	}
+	system := prompts.Get(promptName, contextBlock)
 
 	// 5. LLM-вызов. Атрибутируем спрашивающего, чтобы бот не путал имена из контекста.
 	userMsg := q
@@ -127,10 +143,11 @@ func (a *Answerer) Answer(ctx context.Context, chatID int64, asker, question str
 		"rag_len", len(rag), "recent_len", len(recent), "web_len", len(web),
 		"best_dist", bestDist(topSearch), "q_len", len(q))
 
-	// 5b. LLM вернул SKIP — по теме в истории нет: промолчим (лучше тишина, чем «не обсуждали»).
+	// 5b. LLM вернул SKIP — по теме в истории нет: пассивный режим промолчит (лучше
+	// тишина, чем «не обсуждали»); явный вопрос молчать не может — фиксированный отбой.
 	if isSkip(resp) {
-		slog.Info("chat skip: llm returned skip", "chat_id", chatID)
-		return "", nil
+		slog.Info("chat skip: llm returned skip", "chat_id", chatID, "explicit", explicit)
+		return skipReply(explicit), nil
 	}
 
 	// 6. «Уже обсуждали»: если на похожий вопрос уже был ответ — prepend ссылки.
@@ -294,6 +311,15 @@ func bestDist(top []messages.SearchMessage) float64 {
 // isSkip — LLM вернул SKIP (контекст прошёл гейт, но не отвечает на вопрос).
 func isSkip(resp string) bool {
 	return strings.EqualFold(strings.TrimSpace(resp), "SKIP")
+}
+
+// skipReply — ответ на SKIP LLM: пассивный триггер (упоминание/reply) молчит,
+// явный /ask молчать не может — фиксированный отбой.
+func skipReply(explicit bool) string {
+	if explicit {
+		return "🤷 Ничего полезного не нашёл — ни в истории чата, ни в вебе."
+	}
+	return ""
 }
 
 // sourceLink строит прямую ссылку на сообщение супергруппы: t.me/c/<internal_id>/<msg_id>.
