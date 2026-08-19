@@ -62,6 +62,15 @@ func unmuteUserFull(ctx context.Context, api *bot.Bot, chatID, userID int64) err
 // Гарантирует обратимость кика даже при сбое UnbanChatMember (бан сам спадёт к этому сроку).
 const kickBanSafetyWindow = 24 * time.Hour
 
+// unbanIfBanned снимает бан, только если участник реально забанен (OnlyIfBanned):
+// не трогает свободных участников чата.
+func unbanIfBanned(ctx context.Context, api *bot.Bot, chatID, userID int64) error {
+	_, err := api.UnbanChatMember(ctx, &bot.UnbanChatMemberParams{
+		ChatID: chatID, UserID: userID, OnlyIfBanned: true,
+	})
+	return err
+}
+
 func kickUserReversible(ctx context.Context, api *bot.Bot, chatID, userID int64) error {
 	until := time.Now().Add(kickBanSafetyWindow)
 	if _, err := api.BanChatMember(ctx, &bot.BanChatMemberParams{
@@ -69,12 +78,21 @@ func kickUserReversible(ctx context.Context, api *bot.Bot, chatID, userID int64)
 	}); err != nil {
 		return fmt.Errorf("ban: %w", err)
 	}
-	if _, err := api.UnbanChatMember(ctx, &bot.UnbanChatMemberParams{
-		ChatID: chatID, UserID: userID, OnlyIfBanned: true,
-	}); err != nil {
+	if err := unbanIfBanned(ctx, api, chatID, userID); err != nil {
 		slog.Error("unban failed: user may remain banned until safety window",
 			"chat_id", chatID, "user_id", userID, "until", until, "err", err)
 		return fmt.Errorf("unban: %w", err)
+	}
+	return nil
+}
+
+// banUserForever — необратимый бан (без UntilDate). Только по явному решению админа
+// после эскалации спам-предупреждения; авто-кик/авто-бан запрещены архитектурой.
+func banUserForever(ctx context.Context, api *bot.Bot, chatID, userID int64) error {
+	if _, err := api.BanChatMember(ctx, &bot.BanChatMemberParams{
+		ChatID: chatID, UserID: userID,
+	}); err != nil {
+		return fmt.Errorf("ban forever: %w", err)
 	}
 	return nil
 }

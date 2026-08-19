@@ -17,12 +17,14 @@ import (
 )
 
 type SpamConfig struct {
-	FloodMsgs     int
-	FloodWindow   time.Duration
-	WarnMax       int
-	WarnPeriod    time.Duration
-	RestrictHours time.Duration
-	NewbieMsgs    int
+	FloodMsgs       int
+	FloodWindow     time.Duration
+	WarnMax         int
+	WarnPeriod      time.Duration
+	RestrictHours   time.Duration
+	NewbieMsgs      int
+	TrustMsgs       int
+	EscalateEnabled bool
 }
 
 type SpamInput struct {
@@ -38,6 +40,13 @@ type userBucket struct {
 	times []time.Time
 	last  string
 }
+
+// Причины hard-сигналов эвристики: авторитарны без LLM, но invite у доверенного автора
+// уходит на классификатор (анонсы мероприятий со ссылкой — не спам).
+const (
+	reasonInvite      = "invite/реф-ссылка"
+	reasonMassMention = "массовые @упоминания"
+)
 
 // messageCounter — число сообщений участника в чате (messages.Repository удовлетворяет).
 // Нужен для at-risk-проверки: малая история → полная LLM-классификация сообщения.
@@ -135,10 +144,10 @@ func (f *SpamFilter) Heuristic(in SpamInput) (hit bool, reason string) {
 	low := strings.ToLower(text)
 
 	if containsAny(low, "t.me/+", "t.me/joinchat", "joinchat", "/joinchat") {
-		hit, reason = true, "invite/реф-ссылка"
+		hit, reason = true, reasonInvite
 	}
 	if !hit && strings.Count(text, "@") >= 3 {
-		hit, reason = true, "массовые @упоминания"
+		hit, reason = true, reasonMassMention
 	}
 	if !hit && utf8.RuneCountInString(text) > 12 && capsRatio(text) > 0.6 {
 		hit, reason = true, "CAPS-радио"
@@ -166,23 +175,38 @@ func (f *SpamFilter) Heuristic(in SpamInput) (hit bool, reason string) {
 
 // ClassifyAndEnforce — действие по подозрению. Авторитарные (hard) сигналы эвристики
 // (invite/реф-ссылки, массовые @) срабатывают без LLM; мягкие (CAPS, повтор, флуд) —
-// через классификатор. Возвращает true, если сообщение признано спамом.
-// Fail-safe: любая ошибка LLM → false (не спам, сообщение сохраняется).
+// через классификатор. Исключение: invite-ссылка от доверенного автора (TrustMsgs)
+// уходит классификатору — анонс митапа со ссылкой на регистрацию не спам.
+// Возвращает true, если сообщение признано спамом.
+// Fail-safe: ошибка LLM или непарсящийся ответ → false (не спам), кроме доверенного
+// invite — enforce с исходной причиной (fail-closed: hard-сигнал не должен проходить
+// из-за сбоя или мусора классификатора).
 func (f *SpamFilter) ClassifyAndEnforce(ctx context.Context, in SpamInput, reason string) bool {
-	if isHardReason(reason) {
+	hard := isHardReason(reason)
+	trusted := hard && isInviteReason(reason) && f.trustedAuthor(ctx, in)
+	if hard && !trusted {
 		f.enforce(ctx, in, reason)
 		return true
 	}
-	spam, lreason, err := f.classifyLLM(ctx, in.Text)
-	if err != nil {
-		slog.Warn("spam classify failed, fail-safe not-spam", "err", err)
+	spam, lreason, parsed, err := f.classifyLLM(ctx, in.Text)
+	if err != nil || !parsed {
+		if trusted {
+			slog.Warn("spam classify failed, fail-safe enforce invite", "err", err, "parsed", parsed)
+			f.enforce(ctx, in, reason)
+			return true
+		}
+		slog.Warn("spam classify failed, fail-safe not-spam", "err", err, "parsed", parsed)
 		return false
 	}
 	if !spam {
 		return false
 	}
 	if lreason == "" {
-		lreason = "признано спам-классификатором"
+		if hard {
+			lreason = reason
+		} else {
+			lreason = "признано спам-классификатором"
+		}
 	}
 	f.enforce(ctx, in, lreason)
 	return true
@@ -191,16 +215,34 @@ func (f *SpamFilter) ClassifyAndEnforce(ctx context.Context, in SpamInput, reaso
 // isHardReason — авторитарные сигналы, действующие без LLM (неуязвимы к prompt-инъекции).
 func isHardReason(reason string) bool {
 	switch reason {
-	case "invite/реф-ссылка", "массовые @упоминания":
+	case reasonInvite, reasonMassMention:
 		return true
 	}
 	return false
 }
 
-func (f *SpamFilter) classifyLLM(ctx context.Context, text string) (bool, string, error) {
+func isInviteReason(reason string) bool {
+	return reason == reasonInvite
+}
+
+// trustedAuthor — доверенный автор: достаточно сообщений в истории чата (TrustMsgs).
+// 0 = выключено; nil-счётчик или ошибка → false (fail-safe: hard-сигнал авторитарен).
+func (f *SpamFilter) trustedAuthor(ctx context.Context, in SpamInput) bool {
+	if f.cfg.TrustMsgs <= 0 || f.counter == nil {
+		return false
+	}
+	n, err := f.counter.CountByUser(ctx, in.ChatID, in.UserID, f.cfg.TrustMsgs)
+	if err != nil {
+		slog.Warn("spam trust count", "err", err)
+		return false
+	}
+	return n >= f.cfg.TrustMsgs
+}
+
+func (f *SpamFilter) classifyLLM(ctx context.Context, text string) (bool, string, bool, error) {
 	system := prompts.Get(prompts.Spam)
 	if system == "" {
-		return false, "", fmt.Errorf("spam prompt empty")
+		return false, "", false, fmt.Errorf("spam prompt empty")
 	}
 	// Текст юзера — в role:user, системный промпт статичен: так prompt-инъекция в сообщении
 	// не может переписать инструкции классификатора.
@@ -209,14 +251,14 @@ func (f *SpamFilter) classifyLLM(ctx context.Context, text string) (bool, string
 		{Role: "user", Content: text},
 	})
 	if err != nil {
-		return false, "", fmt.Errorf("spam llm: %w", err)
+		return false, "", false, fmt.Errorf("spam llm: %w", err)
 	}
-	spam, reason := parseSpamVerdict(resp)
-	return spam, reason, nil
+	spam, reason, parsed := parseSpamVerdict(resp)
+	return spam, reason, parsed, nil
 }
 
 func (f *SpamFilter) enforce(ctx context.Context, in SpamInput, reason string) {
-	reason = sanitizeReason(reason)
+	reason = truncateReason(sanitizeReason(reason))
 	now := time.Now()
 	prior, err := f.repo.CountSpamByUser(ctx, in.UserID, now.Add(-f.cfg.WarnPeriod))
 	if err != nil {
@@ -232,28 +274,39 @@ func (f *SpamFilter) enforce(ctx context.Context, in SpamInput, reason string) {
 		restrictUntil = &until
 	}
 
-	if _, err := f.repo.CreateSpamFlag(ctx, in.ChatID, in.MessageID, in.UserID, in.Username, reason, action, restrictUntil); err != nil {
+	flagID, err := f.repo.CreateSpamFlag(ctx, in.ChatID, in.MessageID, in.UserID, in.Username, reason, action, restrictUntil)
+	if err != nil {
 		slog.Warn("create spam flag", "err", err)
+		flagID = 0
 	}
 	deleteChatMessage(ctx, f.api, in.ChatID, in.MessageID)
 
+	params := &bot.SendMessageParams{ChatID: in.ChatID}
+	if flagID != 0 && f.cfg.EscalateEnabled {
+		params.ReplyMarkup = spamKeyboard(flagID)
+	}
 	if action == "restrict" {
 		if err := restrictUserTextOnlyUntil(ctx, f.api, in.ChatID, in.UserID, *restrictUntil); err != nil {
 			slog.Warn("spam restrict user", "err", err)
 		}
-		_, _ = f.api.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: in.ChatID,
-			Text: fmt.Sprintf("🚫 %s — рестрикт на %d ч: только текст (анти-спам). %s",
-				atUser(in.Username, "участник"), int(f.cfg.RestrictHours.Hours()), reason),
-		})
+		params.Text = fmt.Sprintf("🚫 %s — рестрикт на %d ч: только текст (анти-спам). %s",
+			atUser(in.Username, "участник"), int(f.cfg.RestrictHours.Hours()), reason)
+	} else {
+		params.Text = fmt.Sprintf("⚠️ Похоже на спам. Предупреждение %d/%d. %s — %s",
+			prior+1, f.cfg.WarnMax, atUser(in.Username, "участник"), reason)
+	}
+	sent, err := f.api.SendMessage(ctx, params)
+	if err != nil {
+		slog.Warn("spam post warn", "err", err)
+	} else if flagID != 0 && sent != nil {
+		if err := f.repo.SetSpamWarnMessage(ctx, flagID, int64(sent.ID)); err != nil {
+			slog.Warn("set spam warn message", "err", err)
+		}
+	}
+	if action == "restrict" {
 		slog.Info("spam restricted", "user", in.UserID, "prior", prior)
 		return
 	}
-	_, _ = f.api.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: in.ChatID,
-		Text: fmt.Sprintf("⚠️ Похоже на спам. Предупреждение %d/%d. %s — %s",
-			prior+1, f.cfg.WarnMax, atUser(in.Username, "участник"), reason),
-	})
 	slog.Info("spam warned", "user", in.UserID, "prior", prior)
 }
 
@@ -302,22 +355,30 @@ func (f *SpamFilter) sweep(ctx context.Context) {
 	}
 }
 
-func parseSpamVerdict(raw string) (bool, string) {
+// parseSpamVerdict разбирает JSON-вердикт классификатора. parsed=false при невалидном
+// ответе: вызывающий решает, fail-closed (доверенный hard-сигнал) или fail-open (мягкий
+// путь). Модель может скопировать few-shot-формат «Ответ: {...}» — вырезаем подстроку
+// от первого '{' до последнего '}' перед unmarshal.
+func parseSpamVerdict(raw string) (spam bool, reason string, parsed bool) {
 	s := strings.TrimSpace(raw)
 	s = strings.TrimPrefix(s, "```json")
 	s = strings.TrimPrefix(s, "```")
 	s = strings.TrimSuffix(s, "```")
-	s = strings.TrimSpace(s)
+	if i := strings.Index(s, "{"); i >= 0 {
+		if j := strings.LastIndex(s, "}"); j > i {
+			s = s[i : j+1]
+		}
+	}
 
 	var v struct {
 		Spam   bool   `json:"spam"`
 		Reason string `json:"reason"`
 	}
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
-		slog.Warn("spam parse failed, fallback not-spam", "raw", raw, "err", err)
-		return false, ""
+		slog.Warn("spam parse failed", "raw", raw, "err", err)
+		return false, "", false
 	}
-	return v.Spam, v.Reason
+	return v.Spam, v.Reason, true
 }
 
 // spamLinkRe — invite/реф-паттерны для санитизации причины перед постом в чат.

@@ -11,79 +11,89 @@ import (
 
 // Config — все настройки бота.
 type Config struct {
-	TGToken            string
-	AdminIDs           []int64
-	ChatIDs            []int64
-	DBURL              string
-	LLMURL             string
-	LLMAPIKey          string
-	LLMModel           string
-	LLMModelCheap      string
-	EmbedModel         string
-	EmbedDim           int
-	NewcomerTimeout    time.Duration
-	LogPath            string
-	SearXNGURL         string
-	SearXNGMax         int
-	GateEnabled        bool
-	CaptchaTimeout     time.Duration
-	CaptchaMaxAttempts int
-	Probation          time.Duration
-	SpamEnabled        bool
-	SpamFloodMsgs      int
-	SpamFloodWindow    time.Duration
-	SpamWarnMax        int
-	SpamWarnPeriod     time.Duration
-	SpamRestrictHours  time.Duration
-	SpamNewbieMsgs     int
-	VoteEnabled        bool
-	VoteWindow         time.Duration
-	VoteQuorum         int
-	AnniversaryCron    string
-	AnniversaryEnabled bool
-	QuizCheckCron      string
-	QuizEnabled        bool
-	NewsCron           string
-	NewsEnabled        bool
-	FakeNewsEnabled    bool
+	TGToken             string
+	AdminIDs            []int64
+	ChatIDs             []int64
+	DBURL               string
+	LLMURL              string
+	LLMAPIKey           string
+	LLMModel            string
+	LLMModelCheap       string
+	EmbedModel          string
+	EmbedDim            int
+	NewcomerTimeout     time.Duration
+	LogPath             string
+	SearXNGURL          string
+	SearXNGMax          int
+	GateEnabled         bool
+	CaptchaTimeout      time.Duration
+	CaptchaMaxAttempts  int
+	Probation           time.Duration
+	SpamEnabled         bool
+	SpamFloodMsgs       int
+	SpamFloodWindow     time.Duration
+	SpamWarnMax         int
+	SpamWarnPeriod      time.Duration
+	SpamRestrictHours   time.Duration
+	SpamNewbieMsgs      int
+	SpamTrustMsgs       int
+	SpamVoterMsgs       int
+	SpamEscalateSpam    int
+	SpamEscalateOk      int
+	SpamEscalateEnabled bool
+	VoteEnabled         bool
+	VoteWindow          time.Duration
+	VoteQuorum          int
+	AnniversaryCron     string
+	AnniversaryEnabled  bool
+	QuizCheckCron       string
+	QuizEnabled         bool
+	NewsCron            string
+	NewsEnabled         bool
+	FakeNewsEnabled     bool
 }
 
 // Load читает env. Необходимые переменные — фаталят при отсутствии.
 func Load() (*Config, error) {
 	c := &Config{
-		TGToken:            os.Getenv("PHPBOT_TG_TOKEN"),
-		DBURL:              os.Getenv("PHPBOT_DB_URL"),
-		LLMURL:             envOr("PHPBOT_LLM_URL", "https://api.vsellm.ru/v1"),
-		LLMAPIKey:          os.Getenv("PHPBOT_LLM_API_KEY"),
-		LLMModel:           envOr("PHPBOT_LLM_MODEL", "google/gemini-2.5-flash"),
-		LLMModelCheap:      envOr("PHPBOT_LLM_MODEL_CHEAP", "openai/gpt-4o-mini"),
-		EmbedModel:         envOr("PHPBOT_EMBED_MODEL", "text-embedding-3-small"),
-		EmbedDim:           envInt("PHPBOT_EMBED_DIM", 1536),
-		NewcomerTimeout:    envDur("PHPBOT_NEWCOMER_TIMEOUT", 5*time.Minute),
-		LogPath:            os.Getenv("PHPBOT_LOG_PATH"),
-		SearXNGURL:         envOr("PHPBOT_SEARXNG_URL", ""),
-		SearXNGMax:         envInt("PHPBOT_SEARXNG_MAX", 5),
-		GateEnabled:        envBool("PHPBOT_GATE_ENABLED", true),
-		CaptchaTimeout:     envDur("PHPBOT_CAPTCHA_TIMEOUT", 3*time.Minute),
-		CaptchaMaxAttempts: envInt("PHPBOT_CAPTCHA_MAX_ATTEMPTS", 3),
-		Probation:          time.Duration(envInt("PHPBOT_PROBATION_HOURS", 6)) * time.Hour,
-		SpamEnabled:        envBool("PHPBOT_SPAM_ENABLED", true),
-		SpamFloodMsgs:      envInt("PHPBOT_SPAM_FLOOD_MSGS", 5),
-		SpamFloodWindow:    envDur("PHPBOT_SPAM_FLOOD_WINDOW", 30*time.Second),
-		SpamWarnMax:        envInt("PHPBOT_SPAM_WARN_MAX", 3),
-		SpamWarnPeriod:     envDur("PHPBOT_SPAM_WARN_PERIOD", 24*time.Hour),
-		SpamRestrictHours:  time.Duration(envInt("PHPBOT_SPAM_RESTRICT_HOURS", 6)) * time.Hour,
-		SpamNewbieMsgs:     envInt("PHPBOT_SPAM_NEWBIE_MSGS", 8),
-		VoteEnabled:        envBool("PHPBOT_VOTE_ENABLED", true),
-		VoteWindow:         envDur("PHPBOT_VOTE_WINDOW", 15*time.Minute),
-		VoteQuorum:         envInt("PHPBOT_VOTE_QUORUM", 3),
-		AnniversaryCron:    envOr("PHPBOT_ANNIVERSARY_CRON", "0 8 * * *"),
-		AnniversaryEnabled: envBool("PHPBOT_ANNIVERSARY_ENABLED", true),
-		QuizCheckCron:      envOr("PHPBOT_QUIZ_CHECK_CRON", "*/15 * * * *"),
-		QuizEnabled:        envBool("PHPBOT_QUIZ_ENABLED", true),
-		NewsCron:           envOr("PHPBOT_NEWS_CRON", "0 20 * * *"),
-		NewsEnabled:        envBool("PHPBOT_NEWS_ENABLED", true),
-		FakeNewsEnabled:    envBool("PHPBOT_FAKE_NEWS_ENABLED", true),
+		TGToken:             os.Getenv("PHPBOT_TG_TOKEN"),
+		DBURL:               os.Getenv("PHPBOT_DB_URL"),
+		LLMURL:              envOr("PHPBOT_LLM_URL", "https://api.vsellm.ru/v1"),
+		LLMAPIKey:           os.Getenv("PHPBOT_LLM_API_KEY"),
+		LLMModel:            envOr("PHPBOT_LLM_MODEL", "google/gemini-2.5-flash"),
+		LLMModelCheap:       envOr("PHPBOT_LLM_MODEL_CHEAP", "openai/gpt-4o-mini"),
+		EmbedModel:          envOr("PHPBOT_EMBED_MODEL", "text-embedding-3-small"),
+		EmbedDim:            envInt("PHPBOT_EMBED_DIM", 1536),
+		NewcomerTimeout:     envDur("PHPBOT_NEWCOMER_TIMEOUT", 5*time.Minute),
+		LogPath:             os.Getenv("PHPBOT_LOG_PATH"),
+		SearXNGURL:          envOr("PHPBOT_SEARXNG_URL", ""),
+		SearXNGMax:          envInt("PHPBOT_SEARXNG_MAX", 5),
+		GateEnabled:         envBool("PHPBOT_GATE_ENABLED", true),
+		CaptchaTimeout:      envDur("PHPBOT_CAPTCHA_TIMEOUT", 3*time.Minute),
+		CaptchaMaxAttempts:  envInt("PHPBOT_CAPTCHA_MAX_ATTEMPTS", 3),
+		Probation:           time.Duration(envInt("PHPBOT_PROBATION_HOURS", 6)) * time.Hour,
+		SpamEnabled:         envBool("PHPBOT_SPAM_ENABLED", true),
+		SpamFloodMsgs:       envInt("PHPBOT_SPAM_FLOOD_MSGS", 5),
+		SpamFloodWindow:     envDur("PHPBOT_SPAM_FLOOD_WINDOW", 30*time.Second),
+		SpamWarnMax:         envInt("PHPBOT_SPAM_WARN_MAX", 3),
+		SpamWarnPeriod:      envDur("PHPBOT_SPAM_WARN_PERIOD", 24*time.Hour),
+		SpamRestrictHours:   time.Duration(envInt("PHPBOT_SPAM_RESTRICT_HOURS", 6)) * time.Hour,
+		SpamNewbieMsgs:      envInt("PHPBOT_SPAM_NEWBIE_MSGS", 8),
+		SpamTrustMsgs:       envInt("PHPBOT_SPAM_TRUST_MSGS", 30),
+		SpamVoterMsgs:       envInt("PHPBOT_SPAM_VOTER_MSGS", 10),
+		SpamEscalateSpam:    envInt("PHPBOT_SPAM_ESCALATE_SPAM", 3),
+		SpamEscalateOk:      envInt("PHPBOT_SPAM_ESCALATE_OK", 2),
+		SpamEscalateEnabled: envBool("PHPBOT_SPAM_ESCALATE_ENABLED", true),
+		VoteEnabled:         envBool("PHPBOT_VOTE_ENABLED", true),
+		VoteWindow:          envDur("PHPBOT_VOTE_WINDOW", 15*time.Minute),
+		VoteQuorum:          envInt("PHPBOT_VOTE_QUORUM", 3),
+		AnniversaryCron:     envOr("PHPBOT_ANNIVERSARY_CRON", "0 8 * * *"),
+		AnniversaryEnabled:  envBool("PHPBOT_ANNIVERSARY_ENABLED", true),
+		QuizCheckCron:       envOr("PHPBOT_QUIZ_CHECK_CRON", "*/15 * * * *"),
+		QuizEnabled:         envBool("PHPBOT_QUIZ_ENABLED", true),
+		NewsCron:            envOr("PHPBOT_NEWS_CRON", "0 20 * * *"),
+		NewsEnabled:         envBool("PHPBOT_NEWS_ENABLED", true),
+		FakeNewsEnabled:     envBool("PHPBOT_FAKE_NEWS_ENABLED", true),
 	}
 	c.AdminIDs = envInt64List("PHPBOT_ADMIN_IDS")
 	c.ChatIDs = envInt64List("PHPBOT_CHAT_ID")
@@ -96,6 +106,18 @@ func Load() (*Config, error) {
 	}
 	if c.SpamNewbieMsgs < 0 {
 		c.SpamNewbieMsgs = 0
+	}
+	if c.SpamTrustMsgs < 0 {
+		c.SpamTrustMsgs = 0
+	}
+	if c.SpamVoterMsgs < 0 {
+		c.SpamVoterMsgs = 0
+	}
+	if c.SpamEscalateSpam < 1 {
+		c.SpamEscalateSpam = 1
+	}
+	if c.SpamEscalateOk < 1 {
+		c.SpamEscalateOk = 1
 	}
 	if c.VoteQuorum < 1 {
 		c.VoteQuorum = 1

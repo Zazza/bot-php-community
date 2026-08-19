@@ -109,11 +109,21 @@ func main() {
 	spamFilter := moderation.NewSpamFilter(b, llmClient, moderRepo, msgRepo, cfg.AdminIDs, me.ID, moderation.SpamConfig{
 		FloodMsgs: cfg.SpamFloodMsgs, FloodWindow: cfg.SpamFloodWindow,
 		WarnMax: cfg.SpamWarnMax, WarnPeriod: cfg.SpamWarnPeriod, RestrictHours: cfg.SpamRestrictHours,
-		NewbieMsgs: cfg.SpamNewbieMsgs,
+		NewbieMsgs: cfg.SpamNewbieMsgs, TrustMsgs: cfg.SpamTrustMsgs, EscalateEnabled: cfg.SpamEscalateEnabled,
 	})
 	if cfg.SpamEnabled {
 		spamFilter.Start(ctx)
 		defer spamFilter.Stop()
+	}
+
+	spamEsc := moderation.NewSpamEscalation(b, moderRepo, msgRepo, cfg.AdminIDs, me.ID, moderation.EscalationConfig{
+		Enabled:   cfg.SpamEscalateEnabled,
+		VoterMsgs: cfg.SpamVoterMsgs, EscalateSpam: cfg.SpamEscalateSpam, EscalateOk: cfg.SpamEscalateOk,
+		RestrictHours: cfg.SpamRestrictHours,
+	})
+	if cfg.SpamEscalateEnabled {
+		spamEsc.Start(ctx)
+		defer spamEsc.Stop()
 	}
 
 	voteKick := moderation.NewVoteToKick(b, moderRepo, cfg.AdminIDs, me.ID, moderation.VoteConfig{
@@ -138,7 +148,7 @@ func main() {
 
 	handlers := tg.NewHandlers(tg.HandlersDeps{
 		API: b, ChatIDs: cfg.ChatIDs, BotUserID: me.ID,
-		Moderation: moderFlow, Spam: spamFilter, Vote: voteKick,
+		Moderation: moderFlow, Spam: spamFilter, Vote: voteKick, SpamEsc: spamEsc,
 		Users: userRepo, Msgs: msgRepo, Vec: vecRepo,
 		Answerer: answerer, Digester: digester,
 		FAQ: faqRepo, FAQBuilder: faqBuilder, Quiz: quizSvc, News: newsDigester,

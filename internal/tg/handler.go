@@ -49,6 +49,7 @@ type Handlers struct {
 	moderation *moderation.Flow
 	spam       *moderation.SpamFilter
 	vote       *moderation.VoteToKick
+	spamEsc    *moderation.SpamEscalation
 	users      *users.Repository
 	msgs       *messages.Repository
 	vec        *messages.VectorRepo
@@ -69,6 +70,7 @@ type HandlersDeps struct {
 	Moderation *moderation.Flow
 	Spam       *moderation.SpamFilter
 	Vote       *moderation.VoteToKick
+	SpamEsc    *moderation.SpamEscalation
 	Users      *users.Repository
 	Msgs       *messages.Repository
 	Vec        *messages.VectorRepo
@@ -89,6 +91,7 @@ func NewHandlers(d HandlersDeps) *Handlers {
 		moderation: d.Moderation,
 		spam:       d.Spam,
 		vote:       d.Vote,
+		spamEsc:    d.SpamEsc,
 		users:      d.Users,
 		msgs:       d.Msgs,
 		vec:        d.Vec,
@@ -236,6 +239,16 @@ func (h *Handlers) OnCallbackQuery(ctx context.Context, b *bot.Bot, upd *models.
 	}
 	if strings.HasPrefix(cb.Data, "vote:") && h.vote != nil {
 		alert := h.vote.HandleVoteCallback(ctx, cb)
+		if alert == "" {
+			alert = "—"
+		}
+		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+			CallbackQueryID: cb.ID, Text: alert,
+		})
+		return
+	}
+	if strings.HasPrefix(cb.Data, "spamesc:") && h.spamEsc != nil {
+		alert := h.spamEsc.HandleCallback(ctx, cb)
 		if alert == "" {
 			alert = "—"
 		}

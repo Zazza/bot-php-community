@@ -1,6 +1,8 @@
 package prompts
 
 import (
+	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -27,7 +29,7 @@ func TestGetAskChat(t *testing.T) {
 // TestSafetyFirstLine — SAFETY-блок обязателен первой строкой (CLAUDE.md),
 // правки промпта не должны сдвигать его вниз.
 func TestSafetyFirstLine(t *testing.T) {
-	for _, name := range []string{Chat, Ask, Digest, DigestPast, FakeNews} {
+	for _, name := range []string{Chat, Ask, Digest, DigestPast, FakeNews, Spam} {
 		t.Run(name, func(t *testing.T) {
 			if idx := strings.Index(Get(name), "SAFETY:"); idx != 0 {
 				t.Errorf("%s: индекс \"SAFETY:\" = %d, want 0 (SAFETY-блок не первой строкой)", name, idx)
@@ -71,6 +73,41 @@ func TestAskSkipPolicy(t *testing.T) {
 	for _, bad := range []string{"выведи SKIP", "одно слово: SKIP"} {
 		if strings.Contains(p, bad) {
 			t.Errorf("ask.txt: инструкция молчания из chat.txt: %q", bad)
+		}
+	}
+}
+
+// TestSpamFewShotParse — регресс формата few-shot в spam.txt: каждая подстрока
+// {"spam": ...} обязана быть валидным JSON под структуру {spam, reason}, иначе LLM
+// копирует сломанный шаблон и parseSpamVerdict молча уходит в fallback not-spam.
+func TestSpamFewShotParse(t *testing.T) {
+	re := regexp.MustCompile(`\{"spam"[^}]*\}`)
+	matches := re.FindAllString(Get(Spam), -1)
+	if len(matches) < 2 {
+		t.Fatalf("spam.txt: few-shot примеров с {\"spam\": ...} = %d, want >= 2", len(matches))
+	}
+	for _, m := range matches {
+		var v struct {
+			Spam   bool   `json:"spam"`
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal([]byte(m), &v); err != nil {
+			t.Errorf("spam.txt few-shot %q: невалидный JSON: %v", m, err)
+			continue
+		}
+		if v.Reason == "" {
+			t.Errorf("spam.txt few-shot %q: пустой reason", m)
+		}
+	}
+}
+
+// TestSpamPromptAnnounceCriterion — критерий анонса: анонс PHP/IT-мероприятия
+// со ссылкой — НЕ спам. Без него invite от ветерана уходит в enforce по hard-сигналу.
+func TestSpamPromptAnnounceCriterion(t *testing.T) {
+	p := strings.ToLower(Get(Spam))
+	for _, kw := range []string{"анонс", "мероприяти"} {
+		if !strings.Contains(p, kw) {
+			t.Errorf("spam.txt: нет ключевого слова %q (критерий анонса мероприятия исчез)", kw)
 		}
 	}
 }

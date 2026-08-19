@@ -85,31 +85,41 @@ func TestHeuristicFlood(t *testing.T) {
 	}
 }
 
-// TestParseSpamVerdict — устойчивый парсинг LLM-ответа; fail-safe: мусор → (false, "").
+// TestParseSpamVerdict — устойчивый парсинг LLM-ответа: валидный JSON и префикс
+// «Ответ: {...}» (few-shot-копия модели) → parsed=true; мусор/пусто → parsed=false
+// (вызывающий решает fail-closed или fail-open); пустой reason при valid — норма.
 func TestParseSpamVerdict(t *testing.T) {
 	cases := []struct {
 		name       string
 		raw        string
 		wantSpam   bool
 		wantReason string
+		wantParsed bool
 	}{
-		{"spam_true_with_reason", `{"spam": true, "reason": "реклама"}`, true, "реклама"},
-		{"markdown_json_wrapped", "```json\n{\"spam\":true,\"reason\":\"x\"}\n```", true, "x"},
-		{"bare_codeblock", "```\n{\"spam\":true,\"reason\":\"y\"}\n```", true, "y"},
-		{"spam_false_with_reason", `{"spam": false, "reason": "ok"}`, false, "ok"},
-		{"spam_false_no_reason", `{"spam": false}`, false, ""},
-		{"invalid_json_garbage", `not a json at all`, false, ""},
-		{"empty_string", ``, false, ""},
-		{"malformed_braces", `{bad json}`, false, ""},
+		{"spam_true_with_reason", `{"spam": true, "reason": "реклама"}`, true, "реклама", true},
+		{"markdown_json_wrapped", "```json\n{\"spam\":true,\"reason\":\"x\"}\n```", true, "x", true},
+		{"bare_codeblock", "```\n{\"spam\":true,\"reason\":\"y\"}\n```", true, "y", true},
+		{"fewshot_answer_prefix", "Ответ: {\"spam\":true,\"reason\":\"реклама крипты\"}", true, "реклама крипты", true},
+		{"prefix_and_trailing_text", "Вот мой вердикт: {\"spam\":false,\"reason\":\"ok\"} — точно не спам", false, "ok", true},
+		{"spam_false_with_reason", `{"spam": false, "reason": "ok"}`, false, "ok", true},
+		{"spam_false_no_reason", `{"spam": false}`, false, "", true},
+		{"spam_true_no_reason", `{"spam": true}`, true, "", true},
+		{"invalid_json_garbage", `not a json at all`, false, "", false},
+		{"empty_string", ``, false, "", false},
+		{"malformed_braces", `{bad json}`, false, "", false},
+		{"unterminated_brace", `{"spam": true`, false, "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			gotSpam, gotReason := parseSpamVerdict(c.raw)
+			gotSpam, gotReason, gotParsed := parseSpamVerdict(c.raw)
 			if gotSpam != c.wantSpam {
 				t.Errorf("parseSpamVerdict(%q) spam=%v, want %v", c.raw, gotSpam, c.wantSpam)
 			}
 			if gotReason != c.wantReason {
 				t.Errorf("parseSpamVerdict(%q) reason=%q, want %q", c.raw, gotReason, c.wantReason)
+			}
+			if gotParsed != c.wantParsed {
+				t.Errorf("parseSpamVerdict(%q) parsed=%v, want %v", c.raw, gotParsed, c.wantParsed)
 			}
 		})
 	}
@@ -199,5 +209,95 @@ func TestIsAtRiskDisabled(t *testing.T) {
 func TestReviewNotHard(t *testing.T) {
 	if isHardReason("review") {
 		t.Fatal(`isHardReason("review") = true, want false (at-risk must go through LLM)`)
+	}
+}
+
+// TestTrustedAuthor — доверенный автор (TrustMsgs): >= порога сообщений → true
+// (invite уходит классификатору — анонс митапа не спам). 0/отрицательный =
+// kill-switch; nil-счётчик и ошибка счётчика → false (fail-safe: hard-сигнал
+// авторитарен, сбой БД не должен открывать дыру для спам-ссылок).
+func TestTrustedAuthor(t *testing.T) {
+	cases := []struct {
+		name      string
+		n         int
+		err       error
+		noCounter bool
+		trustMsgs int
+		want      bool
+	}{
+		{"kill_switch_zero", 1000, nil, false, 0, false},
+		{"negative_disabled", 1000, nil, false, -5, false},
+		{"nil_counter", 0, nil, true, 30, false},
+		{"counter_error_fail_safe", 0, errors.New("db down"), false, 30, false},
+		{"at_threshold", 30, nil, false, 30, true},
+		{"above_threshold", 810, nil, false, 30, true},
+		{"below_threshold", 29, nil, false, 30, false},
+		{"zero_msgs", 0, nil, false, 30, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var counter messageCounter
+			if !c.noCounter {
+				counter = fakeCounter{n: c.n, err: c.err}
+			}
+			f := NewSpamFilter(nil, nil, nil, counter, nil, 0, SpamConfig{TrustMsgs: c.trustMsgs})
+			got := f.trustedAuthor(context.Background(), SpamInput{ChatID: 1, UserID: 1})
+			if got != c.want {
+				t.Errorf("trustedAuthor(count=%d, trustMsgs=%d) = %v, want %v", c.n, c.trustMsgs, got, c.want)
+			}
+		})
+	}
+}
+
+// TestIsInviteReason — только invite-причина проверяется на доверие автора
+// (анонс мероприятия со ссылкой — не спам); все остальные причины — нет.
+func TestIsInviteReason(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason string
+		want   bool
+	}{
+		{"invite", reasonInvite, true},
+		{"mass_mention_not_invite", reasonMassMention, false},
+		{"caps", "CAPS-радио", false},
+		{"repeat", "повтор подряд", false},
+		{"flood", "флуд", false},
+		{"review", "review", false},
+		{"empty", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isInviteReason(c.reason); got != c.want {
+				t.Errorf("isInviteReason(%q) = %v, want %v", c.reason, got, c.want)
+			}
+		})
+	}
+}
+
+// TestIsHardReason — hard-сигналы действуют без LLM (антипромпт-инъекция).
+// Литеральные строки причин — регресс после рефакторинга на константы:
+// изменение текста причины молча размыкает авторитарную ветку enforce.
+func TestIsHardReason(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason string
+		want   bool
+	}{
+		{"invite_constant", reasonInvite, true},
+		{"mass_mention_constant", reasonMassMention, true},
+		{"invite_literal", "invite/реф-ссылка", true},
+		{"mass_mention_literal", "массовые @упоминания", true},
+		{"caps", "CAPS-радио", false},
+		{"repeat", "повтор подряд", false},
+		{"flood", "флуд", false},
+		{"review", "review", false},
+		{"empty", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isHardReason(c.reason); got != c.want {
+				t.Errorf("isHardReason(%q) = %v, want %v", c.reason, got, c.want)
+			}
+		})
 	}
 }
