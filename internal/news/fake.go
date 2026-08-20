@@ -14,13 +14,11 @@ import (
 )
 
 // Пятничный выпуск: LLM-пародия на PHP-дайджест (все новости/пакеты/ссылки вымышлены).
-// Отдельная ссылка не проходит модерацию ссылок реальных фидов — у неё свой white-список
-// доменов (виды «правдоподобных» ссылок) и своя санитайз-логика по блокам.
-const (
-	fakePostMaxUTF16 = 3900
-	fakeTitle        = "🎰 PHP-дайджест: пятничный выпуск"
-	fakeDisclaimer   = "⚠️ Все новости и пакеты вымышлены, ссылки не работают. Пятничный выпуск — не воспринимай всерьёз."
-)
+// Пост НЕ отличается от обычного выпуска: заголовок общий (digestTitle), маркеров
+// выдуманности нет. Отдельная ссылка не проходит модерацию ссылок реальных фидов —
+// у неё свой white-список доменов (виды «правдоподобных» ссылок) и своя санитайз-логика
+// по блокам.
+const fakePostMaxUTF16 = 3900
 
 // fakeHosts — единственные домены, допустимые в ссылках пятничного выпуска: пародия
 // «по форме» на реальную экосистему, но все пути ведут на несуществующие страницы.
@@ -33,6 +31,11 @@ var fakeHosts = map[string]struct{}{
 
 // mdLinkRe — markdown-ссылка [текст](url) в ответе LLM.
 var mdLinkRe = regexp.MustCompile(`\[[^\[\]]*\]\((https?://[^)\s]+)\)`)
+
+// fakeMetaMarkers — МЕТА-маркеры выдуманности (не контентные слова юмора): их утечка
+// из LLM самопомечает выпуск, нарушая инвариант «неотличим от обычного». Заголовок
+// контролирует код (digestTitle), тело — промпт; это страховка последней линии.
+var fakeMetaMarkers = []string{"пятничн", "вымышлен", "выдум", "первое апреля", "первого апреля", "не всерьёз"}
 
 // isFridaySlot — пятничный слот ежедневного cron-прогона дайджеста.
 func isFridaySlot(t time.Time) bool { return t.Weekday() == time.Friday }
@@ -74,8 +77,9 @@ func (d *Digester) PostFake(ctx context.Context, chatID int64) error {
 }
 
 // sanitizeFakeBody чистит ответ LLM по блокам (разделитель "\n\n"): блок дропается, если
-// содержит markdown-ссылку с чужим доменом или голый URL вне markdown-ссылки. Блоки без
-// URL (заголовки секций) проходят. Не осталось ни одной валидной ссылки → "".
+// содержит markdown-ссылку с чужим доменом, голый URL вне markdown-ссылки или МЕТА-маркер
+// выдуманности. Блоки без URL (заголовки секций) проходят. Не осталось ни одной валидной
+// ссылки → "".
 func sanitizeFakeBody(resp string) string {
 	var blocks []string
 	validLinks := 0
@@ -103,6 +107,14 @@ func sanitizeFakeBody(resp string) string {
 		if urlTokenRe.MatchString(residue) {
 			ok = false
 		}
+		// Утечка МЕТА-маркера выдуманности — блок самопомечает выпуск.
+		low := strings.ToLower(block)
+		for _, m := range fakeMetaMarkers {
+			if strings.Contains(low, m) {
+				ok = false
+				break
+			}
+		}
 		if !ok {
 			continue
 		}
@@ -115,11 +127,11 @@ func sanitizeFakeBody(resp string) string {
 	return strings.Join(blocks, "\n\n")
 }
 
-// assembleFakePost собирает пост: шапка с дисклеймером + тело в пределах лимита TG.
+// assembleFakePost собирает пост: заголовок обычного дайджеста + тело в пределах
+// лимита TG. Маркеров выдуманности нет — выпуск неотличим от обычного.
 func assembleFakePost(body string) string {
-	header := fakeTitle + "\n" + fakeDisclaimer
-	budget := fakePostMaxUTF16 - md.UTF16Len(header) - 2
-	return header + "\n\n" + capFakeBody(body, budget)
+	budget := fakePostMaxUTF16 - md.UTF16Len(digestTitle) - 2
+	return digestTitle + "\n\n" + capFakeBody(body, budget)
 }
 
 // capFakeBody ужимает тело до budget UTF-16: блоки копятся целиком ("\n\n" = 2), блок,

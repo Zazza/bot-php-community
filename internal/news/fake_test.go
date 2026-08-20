@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"phpbot/internal/md"
+	"phpbot/internal/prompts"
 )
 
 func TestIsFridaySlot(t *testing.T) {
@@ -74,7 +75,7 @@ func TestUTF16LenMD(t *testing.T) {
 
 func TestSanitizeFakeBody(t *testing.T) {
 	t.Run("всё валидно — тело не меняется", func(t *testing.T) {
-		in := "**Статьи, которых не было**\n\n[Заголовок](https://php.net/x)\nОписание.\n\n**Пакеты, которых не существует**\n\n• [vrn/php-vedro](https://packagist.org/packages/vrn/php-vedro) — выносит прод в ведро"
+		in := "[Заголовок](https://php.net/x)\nОписание.\n\n📦 **Новые пакеты**\n• [vrn/php-vedro](https://packagist.org/packages/vrn/php-vedro) — выносит прод в ведро"
 		if got := sanitizeFakeBody(in); got != in {
 			t.Fatalf("sanitize = %q, want исходное", got)
 		}
@@ -87,6 +88,16 @@ func TestSanitizeFakeBody(t *testing.T) {
 		}
 		if !strings.Contains(got, "[A]") || !strings.Contains(got, "[C]") {
 			t.Fatalf("валидные блоки потеряны: %q", got)
+		}
+	})
+	t.Run("блок с МЕТА-маркером выдуманности дропается, валидный цел", func(t *testing.T) {
+		in := "[Пятничный RFC](https://php.net/a) утечка из LLM\n\n[B](https://github.com/b) описание"
+		got := sanitizeFakeBody(in)
+		if strings.Contains(got, "Пятничный") || strings.Contains(got, "[A]") {
+			t.Fatalf("МЕТА-маркер не дропнут: %q", got)
+		}
+		if !strings.Contains(got, "[B]") {
+			t.Fatalf("валидный блок потерян: %q", got)
 		}
 	})
 	t.Run("чужая схема/регистр ссылки дропается, валидные целы", func(t *testing.T) {
@@ -128,13 +139,26 @@ func TestSanitizeFakeBody(t *testing.T) {
 }
 
 func TestAssembleFakePost(t *testing.T) {
-	t.Run("шапка и дисклеймер всегда на месте", func(t *testing.T) {
+	t.Run("шапка как у обычного дайджеста, без маркеров выдуманности", func(t *testing.T) {
 		got := assembleFakePost("[Статья](https://php.net/x) текст")
-		if !strings.HasPrefix(got, fakeTitle+"\n"+fakeDisclaimer+"\n\n") {
-			t.Fatalf("шапка/дисклеймер не в начале: %q", got)
+		if !strings.HasPrefix(got, "📰 **PHP-дайджест**\n\n") {
+			t.Fatalf("заголовок не как у обычного дайджеста: %q", got)
+		}
+		for _, bad := range []string{"🎰", "пятничн", "вымышлен", "всерьёз"} {
+			if strings.Contains(got, bad) {
+				t.Fatalf("маркер выдуманности %q в посте: %q", bad, got)
+			}
 		}
 		if !strings.Contains(got, "[Статья](https://php.net/x)") {
 			t.Fatalf("тело потеряно: %q", got)
+		}
+	})
+	t.Run("заголовок — общая константа с обычным дайджестом", func(t *testing.T) {
+		if !strings.HasPrefix(assembleFakePost("x"), digestTitle) {
+			t.Fatalf("digestTitle разошёлся с шапкой фейк-выпуска: %q", digestTitle)
+		}
+		if !strings.HasPrefix(assembleDigest("a", "p"), digestTitle) {
+			t.Fatalf("digestTitle разошёлся с шапкой обычного дайджеста: %q", digestTitle)
 		}
 	})
 	t.Run("гигантское тело ужато в лимит", func(t *testing.T) {
@@ -144,10 +168,32 @@ func TestAssembleFakePost(t *testing.T) {
 		if n := md.UTF16Len(got); n > fakePostMaxUTF16 {
 			t.Fatalf("длина поста = %d UTF-16, want ≤ %d", n, fakePostMaxUTF16)
 		}
-		if !strings.Contains(got, fakeDisclaimer) {
-			t.Fatalf("дисклеймер потерян при обрезке")
+		if !strings.HasPrefix(got, digestTitle) {
+			t.Fatalf("заголовок потерян при обрезке")
 		}
 	})
+}
+
+// TestFakePromptSectionHeaderMatchesDigest — заголовок секции пакетов обязан
+// совпадать у обоих выпусков: в обычном дайджесте его пишет код (assembleDigest),
+// в пятничном — LLM по шаблону промпта. Расхождение литералов = пятничный выпуск
+// визуально отличается от обычного.
+func TestFakePromptSectionHeaderMatchesDigest(t *testing.T) {
+	const header = "📦 **Новые пакеты**"
+	cases := []struct {
+		name string
+		src  string
+	}{
+		{"prompt_template", prompts.Get(prompts.FakeNews)},
+		{"assembleDigest", assembleDigest("статья", "• [vrn/php-vedro](https://packagist.org/packages/vrn/php-vedro) — выносит прод в ведро")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if !strings.Contains(c.src, header) {
+				t.Errorf("%s: заголовок секции пакетов %q отсутствует — форматы выпусков разошлись:\n%s", c.name, header, c.src)
+			}
+		})
+	}
 }
 
 func TestCapFakeBody(t *testing.T) {

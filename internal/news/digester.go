@@ -29,6 +29,10 @@ var ErrNoNews = errors.New("no fresh news")
 // не захватывая «совсем старые».
 const freshWindow = 48 * time.Hour
 
+// digestTitle — заголовок поста дайджеста. Общий для обычного и пятничного выпусков:
+// пятничный не отличается от обычного даже шапкой.
+const digestTitle = "📰 **PHP-дайджест**"
+
 // Digester собирает PHP-дайджест: фетч фидов → дедуп → LLM-куратория → пост.
 type Digester struct {
 	sources     []Source
@@ -411,7 +415,7 @@ func composePackages(body string, cands []Item) (string, []string) {
 // (если есть) секция пакетов.
 func assembleDigest(artText, pkgText string) string {
 	var b strings.Builder
-	b.WriteString("📰 **PHP-дайджест**")
+	b.WriteString(digestTitle)
 	if artText != "" {
 		b.WriteString("\n\n")
 		b.WriteString(artText)
