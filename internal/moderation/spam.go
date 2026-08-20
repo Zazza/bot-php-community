@@ -31,6 +31,7 @@ type SpamInput struct {
 	ChatID    int64
 	UserID    int64
 	Username  string
+	Name      string
 	MessageID int64
 	Text      string
 }
@@ -274,7 +275,7 @@ func (f *SpamFilter) enforce(ctx context.Context, in SpamInput, reason string) {
 		restrictUntil = &until
 	}
 
-	flagID, err := f.repo.CreateSpamFlag(ctx, in.ChatID, in.MessageID, in.UserID, in.Username, reason, action, restrictUntil)
+	flagID, err := f.repo.CreateSpamFlag(ctx, in.ChatID, in.MessageID, in.UserID, in.Username, in.Name, reason, action, restrictUntil)
 	if err != nil {
 		slog.Warn("create spam flag", "err", err)
 		flagID = 0
@@ -290,10 +291,10 @@ func (f *SpamFilter) enforce(ctx context.Context, in SpamInput, reason string) {
 			slog.Warn("spam restrict user", "err", err)
 		}
 		params.Text = fmt.Sprintf("🚫 %s — рестрикт на %d ч: только текст (анти-спам). %s",
-			atUser(in.Username, "участник"), int(f.cfg.RestrictHours.Hours()), reason)
+			userLabel(in.Username, in.Name, "участник"), int(f.cfg.RestrictHours.Hours()), reason)
 	} else {
 		params.Text = fmt.Sprintf("⚠️ Похоже на спам. Предупреждение %d/%d. %s — %s",
-			prior+1, f.cfg.WarnMax, atUser(in.Username, "участник"), reason)
+			prior+1, f.cfg.WarnMax, userLabel(in.Username, in.Name, "участник"), reason)
 	}
 	sent, err := f.api.SendMessage(ctx, params)
 	if err != nil {

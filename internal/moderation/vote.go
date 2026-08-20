@@ -77,7 +77,8 @@ func truncateReason(s string) string {
 
 // StartVote создаёт голосование и постит сообщение с кнопками.
 // Одно активное голосование на цель; per-инициатор cooldown; бота изгнать нельзя.
-func (v *VoteToKick) StartVote(ctx context.Context, chatID, targetUserID int64, targetUsername, reason string, reporterID int64) error {
+// targetName — first_name [+ last_name] цели: без @username пост не анонимен.
+func (v *VoteToKick) StartVote(ctx context.Context, chatID, targetUserID int64, targetUsername, targetName, reason string, reporterID int64) error {
 	if targetUserID == v.botUserID {
 		return fmt.Errorf("бота изгнать нельзя")
 	}
@@ -96,17 +97,18 @@ func (v *VoteToKick) StartVote(ctx context.Context, chatID, targetUserID int64, 
 		return fmt.Errorf("active vote check: %w", err)
 	}
 	if existing != nil {
-		return fmt.Errorf("голосование за @%s уже идёт: %w", targetUsername, ErrVoteAlreadyActive)
+		return fmt.Errorf("голосование уже идёт — %s: %w",
+			userLabel(targetUsername, targetName, "этот участник"), ErrVoteAlreadyActive)
 	}
 
 	reason = truncateReason(sanitizeReason(reason))
 	closesAt := time.Now().Add(v.cfg.Window)
-	voteID, err := v.repo.CreateVote(ctx, chatID, targetUserID, targetUsername, reason, closesAt)
+	voteID, err := v.repo.CreateVote(ctx, chatID, targetUserID, targetUsername, targetName, reason, closesAt)
 	if err != nil {
 		return fmt.Errorf("create vote: %w", err)
 	}
-	text := fmt.Sprintf("🗳 Голосование: изгнать %s?\nПричина: %s\nЗакроется через %v или при кворуме %d голосов «за».",
-		atUser(targetUsername, "участник"), reason, v.cfg.Window, v.cfg.Quorum)
+	text := fmt.Sprintf("🗳 Голосование за изгнание: %s\nПричина: %s\nЗакроется через %v или при кворуме %d голосов «за».",
+		userLabel(targetUsername, targetName, "участник"), reason, v.cfg.Window, v.cfg.Quorum)
 	sent, err := v.api.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:      chatID,
 		Text:        text,
@@ -206,8 +208,8 @@ func (v *VoteToKick) CloseAdmin(ctx context.Context, voteID int64) error {
 	}
 	_, _ = v.api.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: vr.ChatID,
-		Text: fmt.Sprintf("🗳 Голосование за %s закрыто админом (%d за / %d против).",
-			atUser(vr.TargetUsername, "участник"), vr.ForCount, vr.AgainstCount),
+		Text: fmt.Sprintf("🗳 Голосование закрыто админом: %s (%d за / %d против).",
+			userLabel(vr.TargetUsername, vr.TargetName, "участник"), vr.ForCount, vr.AgainstCount),
 	})
 	v.editVoteMessage(ctx, vr, "closed")
 	return nil
@@ -276,14 +278,14 @@ func (v *VoteToKick) resolveVote(ctx context.Context, voteID int64) {
 			slog.Warn("vote kick reversible", "err", err)
 			_, _ = v.api.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: vr.ChatID,
-				Text: fmt.Sprintf("⚠️ Голосование решило изгнать %s, но кик не удался — попросите админа /kick.",
-					atUser(vr.TargetUsername, "участник")),
+				Text: fmt.Sprintf("⚠️ Кик по голосованию не удался — попросите админа /kick: %s.",
+					userLabel(vr.TargetUsername, vr.TargetName, "участник")),
 			})
 		} else {
 			_, _ = v.api.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: vr.ChatID,
-				Text: fmt.Sprintf("⛔ %s изгнан голосованием (%d за / %d против).",
-					atUser(vr.TargetUsername, "участник"), vr.ForCount, vr.AgainstCount),
+				Text: fmt.Sprintf("⛔ Изгнание по итогам голосования: %s (%d за / %d против).",
+					userLabel(vr.TargetUsername, vr.TargetName, "участник"), vr.ForCount, vr.AgainstCount),
 			})
 			slog.Info("vote kicked", "target", vr.TargetUserID, "for", vr.ForCount, "against", vr.AgainstCount)
 		}
@@ -303,11 +305,12 @@ func (v *VoteToKick) editVoteMessage(ctx context.Context, vr *VoteRecord, outcom
 	}
 	var summary string
 	if outcome == "kicked" {
-		summary = fmt.Sprintf("Изгнан (%d за / %d против)", vr.ForCount, vr.AgainstCount)
+		summary = fmt.Sprintf("Исход: изгнание (%d за / %d против)", vr.ForCount, vr.AgainstCount)
 	} else {
-		summary = fmt.Sprintf("Кворум не достигнут (%d за / %d против)", vr.ForCount, vr.AgainstCount)
+		summary = fmt.Sprintf("Исход: кворум не достигнут (%d за / %d против)", vr.ForCount, vr.AgainstCount)
 	}
-	newText := fmt.Sprintf("🗳 Голосование за %s завершено.\n%s", atUser(vr.TargetUsername, "участник"), summary)
+	newText := fmt.Sprintf("🗳 Голосование завершено: %s.\n%s",
+		userLabel(vr.TargetUsername, vr.TargetName, "участник"), summary)
 	_, err := v.api.EditMessageText(ctx, &bot.EditMessageTextParams{
 		ChatID:      vr.ChatID,
 		MessageID:   int(vr.MessageID),

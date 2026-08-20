@@ -261,6 +261,31 @@ func atUser(username, fallback string) string {
 	return "@" + username
 }
 
+// userLabel — публичная идентификация участника в санкционных сообщениях чата:
+// @username при наличии, иначе имя (first_name [+ last_name]), иначе fallback.
+// У многих нет @username — посты больше не анонимны.
+func userLabel(username, name, fallback string) string {
+	if username != "" {
+		return "@" + username
+	}
+	if name = strings.TrimSpace(name); name != "" {
+		return name
+	}
+	return fallback
+}
+
+// userLabelID — идентификация в ЛС админам: userLabel + числовой TG ID всегда —
+// без @username и имени админ не найдёт нарушителя для ручных мер.
+func userLabelID(username, name, fallback string, userID int64) string {
+	return fmt.Sprintf("%s (id %d)", userLabel(username, name, fallback), userID)
+}
+
+// FullName — отображаемое имя TG-профиля (first + last, без лишних пробелов).
+// Единая композиция для spam_flags.display_name и kick_votes.target_name.
+func FullName(first, last string) string {
+	return strings.TrimSpace(strings.TrimSpace(first) + " " + strings.TrimSpace(last))
+}
+
 // gateClickAllowed — капча адресована конкретному новичку: засчитывается только
 // его клик. Иначе любой участник (или подельник спамера) решит мат-капчу за него
 // и размотчит аккаунт.

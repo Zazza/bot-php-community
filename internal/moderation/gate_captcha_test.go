@@ -80,3 +80,56 @@ func TestGateClickAllowed(t *testing.T) {
 		})
 	}
 }
+
+// TestUserLabel — идентификация нарушителя в публичных санкционных постах:
+// @username → имя (first_name [+ last_name]) → fallback. Без username пост
+// больше не анонимен («участник» — только когда нет и имени).
+func TestUserLabel(t *testing.T) {
+	cases := []struct {
+		name     string
+		username string
+		fullName string
+		fallback string
+		want     string
+	}{
+		{"username_wins", "ivan", "Иван Петров", "участник", "@ivan"},
+		{"name_when_no_username", "", "Иван Петров", "участник", "Иван Петров"},
+		{"name_trimmed", "", " Иван ", "участник", "Иван"},
+		{"first_only", "", "Иван", "участника", "Иван"},
+		{"whitespace_name_is_empty", "", "   ", "участник", "участник"},
+		{"nothing_fallback", "", "", "участника", "участника"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := userLabel(c.username, c.fullName, c.fallback); got != c.want {
+				t.Errorf("userLabel(%q, %q, %q) = %q, want %q", c.username, c.fullName, c.fallback, got, c.want)
+			}
+		})
+	}
+}
+
+// TestUserLabelID — ЛС админам: числовой TG ID ВСЕГДА, даже при @username/имени —
+// иначе админ не найдёт нарушителя для ручных мер.
+func TestUserLabelID(t *testing.T) {
+	cases := []struct {
+		name     string
+		username string
+		fullName string
+		fallback string
+		userID   int64
+		want     string
+	}{
+		{"username_plus_id", "ivan", "", "участник", 42, "@ivan (id 42)"},
+		{"name_plus_id", "", "Иван Петров", "участник", 777, "Иван Петров (id 777)"},
+		{"fallback_plus_id", "", "", "участник", 1, "участник (id 1)"},
+		{"username_wins_over_name", "ivan", "Иван", "участник", 5, "@ivan (id 5)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := userLabelID(c.username, c.fullName, c.fallback, c.userID); got != c.want {
+				t.Errorf("userLabelID(%q, %q, %q, %d) = %q, want %q",
+					c.username, c.fullName, c.fallback, c.userID, got, c.want)
+			}
+		})
+	}
+}

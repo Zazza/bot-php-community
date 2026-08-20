@@ -231,6 +231,7 @@ type SpamFlag struct {
 	MessageID       int64      `db:"message_id"`
 	TGUserID        int64      `db:"tg_user_id"`
 	Username        string     `db:"username"`
+	DisplayName     string     `db:"display_name"`
 	Reason          string     `db:"reason"`
 	Action          string     `db:"action"` // warn | restrict
 	DetectedAt      time.Time  `db:"detected_at"`
@@ -245,17 +246,17 @@ type SpamFlag struct {
 	AdminAction     *string    `db:"admin_action"` // banned | restored | NULL
 }
 
-const spamCols = `id, chat_id, message_id, tg_user_id, username, reason, action,
+const spamCols = `id, chat_id, message_id, tg_user_id, username, display_name, reason, action,
 	detected_at, restrict_until, released_at, warn_message_id, spam_count, ok_count,
 	false_positive, false_positive_at, escalated_at, admin_action`
 
-func (r *Repository) CreateSpamFlag(ctx context.Context, chatID, messageID, userID int64, username, reason, action string, restrictUntil *time.Time) (int64, error) {
+func (r *Repository) CreateSpamFlag(ctx context.Context, chatID, messageID, userID int64, username, name, reason, action string, restrictUntil *time.Time) (int64, error) {
 	var id int64
 	err := r.db.GetContext(ctx, &id, `
-		INSERT INTO spam_flags (chat_id, message_id, tg_user_id, username, reason, action, restrict_until)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO spam_flags (chat_id, message_id, tg_user_id, username, display_name, reason, action, restrict_until)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id
-	`, chatID, messageID, userID, username, reason, action, restrictUntil)
+	`, chatID, messageID, userID, username, name, reason, action, restrictUntil)
 	if err != nil {
 		return 0, fmt.Errorf("create spam flag: %w", err)
 	}
@@ -498,6 +499,7 @@ type VoteRecord struct {
 	ChatID         int64      `db:"chat_id"`
 	TargetUserID   int64      `db:"target_user_id"`
 	TargetUsername string     `db:"target_username"`
+	TargetName     string     `db:"target_name"`
 	Reason         string     `db:"reason"`
 	MessageID      int64      `db:"message_id"`
 	ForCount       int        `db:"for_count"`
@@ -508,16 +510,16 @@ type VoteRecord struct {
 	Outcome        string     `db:"outcome"` // open | kicked | closed
 }
 
-const voteCols = `id, chat_id, target_user_id, target_username, reason, message_id,
+const voteCols = `id, chat_id, target_user_id, target_username, target_name, reason, message_id,
 	for_count, against_count, created_at, closes_at, resolved_at, outcome`
 
-func (r *Repository) CreateVote(ctx context.Context, chatID, targetUserID int64, targetUsername, reason string, closesAt time.Time) (int64, error) {
+func (r *Repository) CreateVote(ctx context.Context, chatID, targetUserID int64, targetUsername, targetName, reason string, closesAt time.Time) (int64, error) {
 	var id int64
 	err := r.db.GetContext(ctx, &id, `
-		INSERT INTO kick_votes (chat_id, target_user_id, target_username, reason, closes_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO kick_votes (chat_id, target_user_id, target_username, target_name, reason, closes_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id
-	`, chatID, targetUserID, targetUsername, reason, closesAt)
+	`, chatID, targetUserID, targetUsername, targetName, reason, closesAt)
 	if err != nil {
 		return 0, fmt.Errorf("create vote: %w", err)
 	}

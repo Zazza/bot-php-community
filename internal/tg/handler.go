@@ -197,6 +197,7 @@ func (h *Handlers) OnMessage(ctx context.Context, b *bot.Bot, upd *models.Update
 		if h.spam != nil && msg.From.ID != h.botUserID && !h.moderation.IsAdmin(msg.From.ID) {
 			in := moderation.SpamInput{
 				ChatID: chatID, UserID: msg.From.ID, Username: msg.From.Username,
+				Name:      moderation.FullName(msg.From.FirstName, msg.From.LastName),
 				MessageID: int64(msg.ID), Text: text,
 			}
 			// Жёсткая эвристика → классификация/удаление (hard-сигналы — без LLM).
@@ -1022,9 +1023,11 @@ func (h *Handlers) cmdReport(ctx context.Context, replyChatID, dataChatID int64,
 
 	var targetID int64
 	var targetUsername string
+	var targetName string
 	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
 		targetID = msg.ReplyToMessage.From.ID
 		targetUsername = msg.ReplyToMessage.From.Username
+		targetName = moderation.FullName(msg.ReplyToMessage.From.FirstName, msg.ReplyToMessage.From.LastName)
 	} else {
 		fields := strings.Fields(args)
 		if len(fields) > 0 {
@@ -1066,11 +1069,8 @@ func (h *Handlers) cmdReport(ctx context.Context, replyChatID, dataChatID int64,
 		_ = SendMessage(ctx, h.api, replyChatID, "Админов изгонять нельзя.")
 		return
 	}
-	if targetUsername == "" {
-		targetUsername = fmt.Sprintf("user_%d", targetID)
-	}
 
-	if err := h.vote.StartVote(ctx, dataChatID, targetID, targetUsername, reason, fromID); err != nil {
+	if err := h.vote.StartVote(ctx, dataChatID, targetID, targetUsername, targetName, reason, fromID); err != nil {
 		switch {
 		case errors.Is(err, moderation.ErrVoteAlreadyActive), errors.Is(err, moderation.ErrReportCooldown):
 			_ = SendMessage(ctx, h.api, replyChatID, err.Error())

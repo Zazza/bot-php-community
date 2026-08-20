@@ -224,15 +224,15 @@ func (e *SpamEscalation) escalate(ctx context.Context, flag *SpamFlag, spamN, ne
 		slog.Warn("spam escalate restrict", "err", err)
 		_, _ = e.api.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: fresh.ChatID,
-			Text: fmt.Sprintf("⚠️ Эскалация сработала, но рестрикт %s не удался — админ, примите меры.",
-				atUser(fresh.Username, "участника")),
+			Text: fmt.Sprintf("⚠️ Эскалация сработала, но рестрикт не удался — админ, примите меры: %s.",
+				userLabel(fresh.Username, fresh.DisplayName, "участник")),
 		})
 	}
 	if err := e.repo.SetSpamRestrict(ctx, fresh.ID, until); err != nil {
 		slog.Warn("set spam restrict", "err", err)
 	}
-	e.editWarnMessage(ctx, fresh, fmt.Sprintf("🚫 Эскалация: %d/%d за спам — рестрикт %d ч (только текст).",
-		spamN, need, int(e.cfg.RestrictHours.Hours())))
+	e.editWarnMessage(ctx, fresh, fmt.Sprintf("🚫 Эскалация: %d/%d за спам — рестрикт %d ч (только текст): %s.",
+		spamN, need, int(e.cfg.RestrictHours.Hours()), userLabel(fresh.Username, fresh.DisplayName, "участник")))
 	e.notifyAdmins(ctx, fresh, spamN, need)
 	slog.Info("spam escalated", "flag", fresh.ID, "user", fresh.TGUserID, "spam", spamN)
 }
@@ -258,8 +258,8 @@ func (e *SpamEscalation) clear(ctx context.Context, flag *SpamFlag, okN, need in
 			slog.Warn("spam false positive unmute", "err", err)
 			_, _ = e.api.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: flag.ChatID,
-				Text: fmt.Sprintf("⚠️ Снятие рестрикта с %s не удалось (ошибка TG) — снимите вручную.",
-					atUser(flag.Username, "участника")),
+				Text: fmt.Sprintf("⚠️ Снятие рестрикта не удалось (ошибка TG) — снимите вручную: %s.",
+					userLabel(flag.Username, flag.DisplayName, "участник")),
 			})
 			return
 		}
@@ -291,13 +291,13 @@ func (e *SpamEscalation) banForever(ctx context.Context, flag *SpamFlag) string 
 	if err := banUserForever(ctx, e.api, flag.ChatID, flag.TGUserID); err != nil {
 		slog.Warn("spam ban forever", "err", err)
 		return e.failAdminAction(ctx, flag, "banned",
-			fmt.Sprintf("⚠️ Бан %s не удался (ошибка TG) — повторите клик или забаньте вручную.",
-				atUser(flag.Username, "участника")))
+			fmt.Sprintf("⚠️ Бан не удался (ошибка TG) — повторите клик или забаньте вручную: %s.",
+				userLabel(flag.Username, flag.DisplayName, "участник")))
 	}
 	_, _ = e.api.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: flag.ChatID,
-		Text: fmt.Sprintf("⛔ %s забанен админом за спам.",
-			atUser(flag.Username, "участник")),
+		Text: fmt.Sprintf("⛔ Забанен админом за спам: %s.",
+			userLabel(flag.Username, flag.DisplayName, "участник")),
 	})
 	slog.Info("spam banned by admin", "flag", flag.ID, "user", flag.TGUserID)
 	return "Забанен навсегда"
@@ -320,22 +320,22 @@ func (e *SpamEscalation) restore(ctx context.Context, flag *SpamFlag) string {
 	if err := unbanIfBanned(ctx, e.api, flag.ChatID, flag.TGUserID); err != nil {
 		slog.Warn("spam restore unban", "err", err)
 		return e.failAdminAction(ctx, flag, "restored",
-			fmt.Sprintf("⚠️ Восстановление %s не удалось (ошибка TG) — повторите клик или снимите бан вручную.",
-				atUser(flag.Username, "участника")))
+			fmt.Sprintf("⚠️ Восстановление не удалось (ошибка TG) — повторите клик или снимите бан вручную: %s.",
+				userLabel(flag.Username, flag.DisplayName, "участник")))
 	}
 	if err := unmuteUserFull(ctx, e.api, flag.ChatID, flag.TGUserID); err != nil {
 		slog.Warn("spam restore unmute", "err", err)
 		return e.failAdminAction(ctx, flag, "restored",
-			fmt.Sprintf("⚠️ Снятие рестрикта с %s не удалось (ошибка TG) — повторите клик или снимите вручную.",
-				atUser(flag.Username, "участника")))
+			fmt.Sprintf("⚠️ Снятие рестрикта не удалось (ошибка TG) — повторите клик или снимите вручную: %s.",
+				userLabel(flag.Username, flag.DisplayName, "участник")))
 	}
 	if err := e.repo.ReleaseSpamRestrict(ctx, flag.ID); err != nil {
 		slog.Warn("release spam restrict", "err", err)
 	}
 	_, _ = e.api.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: flag.ChatID,
-		Text: fmt.Sprintf("↩️ Рестрикт с %s снят админом.",
-			atUser(flag.Username, "участника")),
+		Text: fmt.Sprintf("↩️ Рестрикт снят админом: %s.",
+			userLabel(flag.Username, flag.DisplayName, "участник")),
 	})
 	slog.Info("spam restored by admin", "flag", flag.ID, "user", flag.TGUserID, "after_ban", wasBanned)
 	return "Рестрикт снят"
@@ -376,10 +376,10 @@ func (e *SpamEscalation) notifyAdmins(ctx context.Context, flag *SpamFlag, spamN
 		voterLine = "—"
 	}
 	reason := truncateReason(sanitizeReason(flag.Reason))
-	dmText := fmt.Sprintf("🚨 %s получил %d/%d голосов за спам: %s\nГолосовали: %s",
-		atUser(flag.Username, "участник"), spamN, need, reason, voterLine)
-	chatText := fmt.Sprintf("🚨 %s получил %d/%d голосов за спам: %s",
-		atUser(flag.Username, "участник"), spamN, need, reason)
+	dmText := fmt.Sprintf("🚨 Спам-эскалация: %s — %d/%d голосов\nПричина: %s\nГолосовали: %s",
+		userLabelID(flag.Username, flag.DisplayName, "участник", flag.TGUserID), spamN, need, reason, voterLine)
+	chatText := fmt.Sprintf("🚨 Спам-эскалация: %s — %d/%d голосов. Причина: %s",
+		userLabel(flag.Username, flag.DisplayName, "участник"), spamN, need, reason)
 	kb := adminKeyboard(flag.ID)
 
 	delivered := false
