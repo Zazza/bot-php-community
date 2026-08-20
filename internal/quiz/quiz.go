@@ -57,8 +57,9 @@ func (q *Quiz) Post(ctx context.Context, chatID int64) error {
 // HandleQuizCallback обрабатывает тап по варианту: учитывает голос (один на юзера),
 // отвечает тостом ✅/❌ и обновляет live-tally на сообщении. «Показать ответ» отвечает
 // модальным алертом — он виден ТОЛЬКО нажавшему, не срывает голосование и не исчезает
-// сам (в отличие от тоста). Возвращает (текст, showAlert). Текст капируется ≤200 UTF-16
-// — лимит Telegram answerCallbackQuery; при превышении алерт молча не покажется.
+// сам (в отличие от тоста); раскрывается лишь проголосовавшему (по quiz_ballots), сбой
+// БД — fail-closed, без раскрытия. Возвращает (текст, showAlert). Текст капируется
+// ≤200 UTF-16 — лимит Telegram answerCallbackQuery; при превышении алерт молча не покажется.
 func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery) (string, bool) {
 	parts := strings.Split(cb.Data, ":") // quiz:<id>:<opt>
 	if len(parts) != 3 {
@@ -75,7 +76,13 @@ func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery)
 
 	// «Показать ответ»: модальный алерт (showAlert=true) виден ТОЛЬКО нажавшему. Сообщение
 	// не меняем, кнопки не снимаем, голосование не срываем — один человек не раскрывает ответ всем.
+	// Гейт: ответ раскрывается только проголосовавшему, иначе участники подглядывают верный
+	// вариант и отвечают безошибочно. При сбое БД не раскрываем (fail-closed).
 	if parts[2] == "r" {
+		voted, err := q.repo.HasBallot(ctx, id, cb.From.ID)
+		if text, reveal := revealGate(voted, err); !reveal {
+			return text, false
+		}
 		counts, _ := q.repo.BallotCounts(ctx, id)
 		return capAlert(revealToast(row, counts)), true
 	}
@@ -122,6 +129,18 @@ func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery)
 		}
 	}
 	return capAlert(toast), false
+}
+
+// revealGate решает, раскрывать ли правильный ответ нажавшему «Показать ответ»:
+// только проголосовавшему; сбой БД — fail-closed, без раскрытия.
+func revealGate(voted bool, err error) (text string, reveal bool) {
+	if err != nil {
+		return "Ошибка, попробуй ещё", false
+	}
+	if !voted {
+		return "Сначала выбери вариант 🙂", false
+	}
+	return "", true
 }
 
 // renderQuestion собирает текст вопроса с вариантами и (если есть голоса) live-tally.

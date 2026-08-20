@@ -1,15 +1,16 @@
 package quiz
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
 
 func TestUTF16Len(t *testing.T) {
 	cases := map[string]int{
-		"abc":  3,
-		"абв":  3,
-		"👁":    2, // суррогатная пара
+		"abc": 3,
+		"абв": 3,
+		"👁":   2, // суррогатная пара
 		"👁👁":  4,
 	}
 	for s, want := range cases {
@@ -96,5 +97,35 @@ func TestRevealToastCappedFitsLimit(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "…") {
 		t.Errorf("capped reveal должен обрезать хвост пояснения «…»: %q", got)
+	}
+}
+
+// Регрессия гейта «Показать ответ»: подглядывание верного варианта до собственного ответа
+// запрещено. Тексты в таблице — продовые строки revealGate; их смена или перестановка
+// проверок (err должен доминировать над voted) ловится здесь. Полную проводку ветки "r"
+// в HandleQuizCallback юнит-тестом не покрываем (нужны TG-api и БД).
+func TestRevealGate(t *testing.T) {
+	cases := []struct {
+		name       string
+		voted      bool
+		err        error
+		wantText   string
+		wantReveal bool
+	}{
+		{"db_error_fail_closed", false, errors.New("has ballot: conn refused"), "Ошибка, попробуй ещё", false},
+		{"db_error_beats_voted", true, errors.New("has ballot: timeout"), "Ошибка, попробуй ещё", false},
+		{"not_voted_blocked", false, nil, "Сначала выбери вариант 🙂", false},
+		{"voted_reveals", true, nil, "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			text, reveal := revealGate(c.voted, c.err)
+			if text != c.wantText {
+				t.Errorf("revealGate(voted=%v, err=%v) text = %q, want %q", c.voted, c.err, text, c.wantText)
+			}
+			if reveal != c.wantReveal {
+				t.Errorf("revealGate(voted=%v, err=%v) reveal = %v, want %v", c.voted, c.err, reveal, c.wantReveal)
+			}
+		})
 	}
 }

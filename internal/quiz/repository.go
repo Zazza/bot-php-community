@@ -149,6 +149,17 @@ func (r *Repository) RecordBallot(ctx context.Context, quizID, userID int64, cho
 	return n > 0, nil
 }
 
+// HasBallot — голосовал ли участник в этой викторине.
+func (r *Repository) HasBallot(ctx context.Context, quizID, userID int64) (bool, error) {
+	var exists bool
+	if err := r.db.GetContext(ctx, &exists,
+		`SELECT EXISTS(SELECT 1 FROM quiz_ballots WHERE quiz_id = $1 AND user_id = $2)`,
+		quizID, userID); err != nil {
+		return false, fmt.Errorf("has ballot: %w", err)
+	}
+	return exists, nil
+}
+
 // CountBallots возвращает общее число ответов и число верных.
 func (r *Repository) CountBallots(ctx context.Context, quizID int64) (total, correct int, err error) {
 	var row struct {
