@@ -29,6 +29,26 @@ var ErrNoNews = errors.New("no fresh news")
 // не захватывая «совсем старые».
 const freshWindow = 48 * time.Hour
 
+// freshCutoff — граница свежести с учётом пропущенных реальных слотов. Пятничный слот
+// занимает фейк-выпуск: отбора реальных новостей нет, и без расширения окна статья,
+// не отобранная LLM в четверг, молча истекает по 48ч в субботу (инцидент 2026-08-22:
+// freek.dev/3182, опубликована чт 16:48, отсечена сб 20:00 границей чт 20:00 — на
+// один отбор была всего одна попытка). За каждый пятничный день внутри вычитаемого
+// периода окно удлиняется на сутки. Инвариант: при 48ч в окне максимум одна пятница —
+// однопроходный скан корректен; при freshWindow ≥ ~5 дней начал бы недосчитывать.
+func freshCutoff(now time.Time, fakeEnabled bool) time.Time {
+	cutoff := now.Add(-freshWindow)
+	if !fakeEnabled {
+		return cutoff
+	}
+	for d := cutoff; d.Before(now); d = d.AddDate(0, 0, 1) {
+		if isFridaySlot(d) {
+			cutoff = cutoff.AddDate(0, 0, -1)
+		}
+	}
+	return cutoff
+}
+
 // digestTitle — заголовок поста дайджеста. Общий для обычного и пятничного выпусков:
 // пятничный не отличается от обычного даже шапкой.
 const digestTitle = "📰 **PHP-дайджест**"
@@ -101,7 +121,7 @@ func (d *Digester) Stop() {
 // LLM-секциями, pre-release версии отбрасываются.
 func (d *Digester) Post(ctx context.Context, chatID int64) error {
 	items := Fetch(ctx, d.sources)
-	fresh := filterFresh(items, time.Now().Add(-freshWindow))
+	fresh := filterFresh(items, freshCutoff(time.Now(), d.fakeEnabled))
 	posted, err := d.repo.PostedHashes(ctx, chatID)
 	if err != nil {
 		return err

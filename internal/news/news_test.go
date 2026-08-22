@@ -86,6 +86,51 @@ func TestFilterFresh(t *testing.T) {
 	}
 }
 
+// TestFreshCutoff — пятничный фейк-слот не отбирал новости: окно свежести удлиняется
+// на сутки за каждую пятницу внутри периода, чтобы не отобранная в четверг статья не
+// истекала молча в субботу. Без фейка и в будничных прогонах — прежние 48ч.
+func TestFreshCutoff(t *testing.T) {
+	fri := time.Date(2026, 8, 21, 20, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		now  time.Time
+		fake bool
+		want time.Time
+	}{
+		{"суббота после фейк-пятницы: 72ч", fri.AddDate(0, 0, 1), true, fri.AddDate(0, 0, 1).Add(-72 * time.Hour)},
+		{"суббота, фейк выключен: 48ч", fri.AddDate(0, 0, 1), false, fri.AddDate(0, 0, 1).Add(-48 * time.Hour)},
+		{"сам пятничный слот: без расширения", fri, true, fri.Add(-48 * time.Hour)},
+		{"воскресенье: пятница на границе окна тоже удлиняет", fri.AddDate(0, 0, 2), true, fri.AddDate(0, 0, 2).Add(-72 * time.Hour)},
+		{"понедельник: пятниц в окне нет", fri.AddDate(0, 0, 3), true, fri.AddDate(0, 0, 3).Add(-48 * time.Hour)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := freshCutoff(c.now, c.fake); !got.Equal(c.want) {
+				t.Errorf("freshCutoff(%s, fake=%v) = %s, want %s", c.now.Format("Mon 02.01 15:04"), c.fake, got, c.want)
+			}
+		})
+	}
+}
+
+// TestFreshCutoffRescuesThursdayPost — регрессия инцидента 2026-08-22: статья
+// freek.dev/3182 (опубликована чт 16:48 МСК = 13:48 UTC) обязана быть кандидатом
+// субботнего прогона, если пятницу занял фейк-выпуск.
+func TestFreshCutoffRescuesThursdayPost(t *testing.T) {
+	sat := time.Date(2026, 8, 22, 20, 0, 0, 0, time.UTC)
+	items := []Item{{
+		Source:    Source{Name: "Freek Van der Herten", URL: "https://freek.dev/feed", Category: "blog"},
+		Title:     "Modular Monoliths: Creating Real Boundaries Before Reaching for Microservices",
+		Link:      "https://freek.dev/3182-modular-monoliths-creating-real-boundaries-before-reaching-for-microservices",
+		Published: time.Date(2026, 8, 20, 13, 48, 25, 0, time.UTC),
+	}}
+	if got := filterFresh(items, freshCutoff(sat, true)); len(got) != 1 {
+		t.Fatalf("фильтр выкинул статью freek: осталось %d, want 1", len(got))
+	}
+	if got := filterFresh(items, sat.Add(-freshWindow)); len(got) != 0 {
+		t.Error("фикстура неверна: статья и старым окном 48ч проходила бы, инцидент не воспроизводится")
+	}
+}
+
 func TestDropPosted(t *testing.T) {
 	src := Source{Name: "s", URL: "u", Category: "hub"}
 	items := []Item{
