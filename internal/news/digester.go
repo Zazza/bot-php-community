@@ -37,6 +37,7 @@ const digestTitle = "📰 **PHP-дайджест**"
 type Digester struct {
 	sources     []Source
 	llm         *llm.LLMClient
+	llmFake     *llm.LLMClient // умная: пятничный фейк-выпуск
 	repo        *Repository
 	api         Poster
 	chatIDs     []int64
@@ -44,13 +45,13 @@ type Digester struct {
 	fakeEnabled bool
 }
 
-// NewDigester создаёт Digester. sources=nil → DefaultSources. fakeEnabled — пятничная
-// рубрика «выпуск, которого не было» (LLM-пародия) вместо обычного дайджеста по пятницам.
-func NewDigester(llm *llm.LLMClient, repo *Repository, api Poster, chatIDs []int64, sources []Source, fakeEnabled bool) *Digester {
+// NewDigester создаёт Digester. sources=nil → DefaultSources. llmFake — умная модель
+// пятничного фейк-выпуска; fakeEnabled — рубрика вместо обычного дайджеста по пятницам.
+func NewDigester(llm, llmFake *llm.LLMClient, repo *Repository, api Poster, chatIDs []int64, sources []Source, fakeEnabled bool) *Digester {
 	if len(sources) == 0 {
 		sources = DefaultSources()
 	}
-	return &Digester{sources: sources, llm: llm, repo: repo, api: api, chatIDs: chatIDs, fakeEnabled: fakeEnabled}
+	return &Digester{sources: sources, llm: llm, llmFake: llmFake, repo: repo, api: api, chatIDs: chatIDs, fakeEnabled: fakeEnabled}
 }
 
 // Start регистрирует пост дайджеста (по умолчанию ежедневно 19:00) и запускает cron.

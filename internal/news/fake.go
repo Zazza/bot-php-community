@@ -3,10 +3,12 @@ package news
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"phpbot/internal/llm"
 	"phpbot/internal/md"
@@ -51,17 +53,187 @@ func fakeHostAllowed(link string) bool {
 	return ok
 }
 
+// fakeRubric — рубрика пятничного выпуска: тематический фокус + подсказки тона.
+type fakeRubric struct {
+	ID    string // стабильный идентификатор (в БД и логах)
+	Title string // название для user-сообщения
+	Brief string // 1–2 предложения: о чём выпуск (примеры тем)
+	Tone  string // акцент тона для этой рубрики
+}
+
+// fakeRubrics — пул рубрик; рубрика недели = fakeRubrics[ISOWeek%len] (stateless-ротация,
+// 12 рубрик ≈ квартальный цикл без хранения состояния).
+var fakeRubrics = []fakeRubric{
+	{
+		ID:    "unusual",
+		Title: "Необычное применение PHP",
+		Brief: "Вымышленные, но реалистичные кейсы PHP вне веба: станок с ЧПУ под управлением PHP-демона, метеостанция на Raspberry Pi, умный аквариум с автодоливом, телеметрия дрона, сервер для ретро-игр, касса в пекарне, автополив теплицы.",
+		Tone:  "Техническая конкретика приборов и железа: датчики, порты, протоколы, миллисекунды; юмор — в невозмутимой серьёзности, с которой PHP берётся за задачу любого масштаба.",
+	},
+	{
+		ID:    "releases",
+		Title: "Релизы и RFC ядра",
+		Brief: "Несуществующие релизы PHP и вымышленные RFC: курьёзные строки changelog, предложения по ядру, голосования за синтаксис, депрекации древних фич, релиз-менеджеры-герои.",
+		Tone:  "Сдержанный тон официальных релиз-ноутов; юмор — в абсолютно серьёзной мотивации заведомо странных изменений.",
+	},
+	{
+		ID:    "legacy",
+		Title: "Легаси-археология",
+		Brief: "Находки в старом коде и PHP 4/5 в проде: слои эпох в одном файле, комментарии 2007 года, mysql_*, деплой по FTP, CMS ранних нулевых, которое всё ещё держит нагрузку.",
+		Tone:  "Тон сдержанного уважения к выжившему; юмор — в контрасте эпох: код старше разработчика, который его чинит.",
+	},
+	{
+		ID:    "composer",
+		Title: "Composer и пакетный ад",
+		Brief: "Зависимости и пакетный менеджмент: вымышленные пакеты с неожиданными транзитивными зависимостями, конфликты версий, чудеса автолоада, зеркала-призраки, lock-файл от разработчика, который уволился.",
+		Tone:  "Тон усталого смирения перед деревом зависимостей; юмор — в гордости за распутанные 400 пакетов ради одной функции.",
+	},
+	{
+		ID:    "typing",
+		Title: "Типизация и сравнения",
+		Brief: "Типы, строгие режимы и сравнения: == против ===, жонглирование типами, строка, которая оказалась не строкой, enum'ы и аннотации, вечные споры о generics.",
+		Tone:  "Педантичная точность с примерами сравнений; юмор — в невозмутимой подаче неожиданных результатов.",
+	},
+	{
+		ID:    "frameworks",
+		Title: "Фреймворк-войны",
+		Brief: "Вымышленные фреймворки-пародии (НЕ реальные имена): релизы, миграции с фреймворка на фреймворк, бенчмарки hello-world, обратная совместимость, документация, опаздывающая на релиз.",
+		Tone:  "Тон военных сводок с фронтов чужих релизов; юмор — в серьёзной аналитике надуманных противостояний.",
+	},
+	{
+		ID:    "interview",
+		Title: "Собеседования и найм",
+		Brief: "Вымышленные задачи и кейсы с собеседований: прожарки, вопросы про замыкания на позицию в пекарню, тестовые на неделю, белые доски, зарплатные вилки и офферы.",
+		Tone:  "Тон протокола диалога с рекрутером; юмор — в абсурдно завышенных требованиях к простым ролям.",
+	},
+	{
+		ID:    "perf",
+		Title: "Производительность и бенчмарки",
+		Brief: "Оптимизации и измерения: отжатые опсекунды, кэш поверх кеша, микробенчмарки foreach vs array_map, тюнинг OPcache, экономия памяти на строках.",
+		Tone:  "Тон инженерного отчёта с измерениями; юмор — в гордости за сэкономленные 12 мс ценой двух недель работы.",
+	},
+	{
+		ID:    "security",
+		Title: "Security-зоопарк",
+		Brief: "Вымышленные CVE и advisory: странные векторы атак, патчи безопасности, ответственные раскрытия, эскалации через php.ini, санитайзеры и обфускация.",
+		Tone:  "Тон срочного бюллетеня безопасности; юмор — в серьёзном CVSS-скоринге ничтожной уязвимости.",
+	},
+	{
+		ID:    "tooling",
+		Title: "Инструменты и CI",
+		Brief: "Линтеры, статанализ и CI: вымышленные анализаторы, драконовские правила кодстайла, пайплайны, собирающиеся дольше, чем живёт проект, все фиксы одним PR.",
+		Tone:  "Тон лендинга девтула с обещаниями; юмор — в машинной уверенности линтера, который прав всегда.",
+	},
+	{
+		ID:    "community",
+		Title: "Митапы и конференции",
+		Brief: "Вымышленные события PHP-мира: митапы и конференции в неожиданных местах, CFP-дедлайны, доклады, афтепати, талисманы конференций, трагически закончившийся кофе.",
+		Tone:  "Тон афиши и репортажа с события; юмор — в трогательных организаторских деталях.",
+	},
+	{
+		ID:    "postmortem",
+		Title: "Прод-инциденты",
+		Brief: "Вымышленные постмортемы (компании без реальных имён): падение прода из-за одной строки, каскадные отказы, пятничный деплой, истории rollback'ов, blameless-разборы.",
+		Tone:  "Хроникальная точность таймлайна инцидента; юмор — в спокойной фиксации катастрофических решений.",
+	},
+}
+
+// pickRubric — рубрика недели детерминированно по ISO-номеру недели (stateless).
+func pickRubric(t time.Time) fakeRubric {
+	_, w := t.ISOWeek()
+	return fakeRubrics[w%len(fakeRubrics)]
+}
+
+const fakeMemoryIssues = 24       // сколько прошлых выпусков помним (2 цикла ротации 12 рубрик)
+const fakeRecentHeadlines = 168   // кап ban-листа тем по количеству
+const fakeRecentTotalRunes = 6000 // кап ban-листа тем по суммарной длине (бюджет user-сообщения)
+const fakeHeadlineMaxRunes = 120  // кап одного заголовка бан-листа
+
+// mdTitleLinkRe — md-ссылка с захватом текста (mdLinkRe берёт только URL).
+var mdTitleLinkRe = regexp.MustCompile(`\[([^\[\]]+)\]\((https?://[^)\s]+)\)`)
+
+// extractFakeHeadlines — тексты md-ссылок (заголовки статей/имена пакетов) из тел
+// прошлых выпусков: whitespace/control-символы схлопнуты в один пробел (текст из LLM
+// не может подделать структуру user-сообщения переносами строк), каждый заголовок
+// капится по fakeHeadlineMaxRunes, весь список — по fakeRecentHeadlines и суммарной
+// длине fakeRecentTotalRunes; дедуп с сохранением порядка первого вхождения.
+func extractFakeHeadlines(bodies []string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	n := 0
+	for _, body := range bodies {
+		for _, m := range mdTitleLinkRe.FindAllStringSubmatch(body, -1) {
+			h := strings.Map(func(r rune) rune {
+				if unicode.IsSpace(r) || unicode.IsControl(r) {
+					return ' '
+				}
+				return r
+			}, m[1])
+			h = strings.Join(strings.Fields(h), " ")
+			if h == "" {
+				continue
+			}
+			if r := []rune(h); len(r) > fakeHeadlineMaxRunes {
+				h = string(r[:fakeHeadlineMaxRunes])
+			}
+			if _, ok := seen[h]; ok {
+				continue
+			}
+			seen[h] = struct{}{}
+			out = append(out, h)
+			n += len(h)
+			if len(out) >= fakeRecentHeadlines || n > fakeRecentTotalRunes {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// bodiesOf — тела прошлых выпусков из строк БД (для бан-листа тем).
+func bodiesOf(rows []FakeRow) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Body)
+	}
+	return out
+}
+
+// buildFakeUserMessage — user-сообщение: дата, рубрика, ban-лист тем. Динамический
+// контент только здесь (промпт статичен — анти-инъекция).
+func buildFakeUserMessage(t time.Time, rubric fakeRubric, recent []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Выпуск от %s.\n\n", t.Format("02.01.2006"))
+	fmt.Fprintf(&b, "Рубрика выпуска: %s.\n%s Весь выпуск держи в тематике рубрики.\nТон: %s\n",
+		rubric.Title, rubric.Brief, rubric.Tone)
+	if len(recent) > 0 {
+		b.WriteString("\nТемы прошлых выпусков — НЕ повторяй их и близкие вариации:\n")
+		for _, h := range recent {
+			b.WriteString("- " + h + "\n")
+		}
+	}
+	return b.String()
+}
+
 // PostFake генерирует и постит «пятничный выпуск» — шуточный полностью вымышленный
-// дайджест. Ручной запуск (/news fake) и пятничный cron-слот (fallback на обычный Post
-// при ошибке — в вызывающем коде).
+// дайджест в рубрике недели (stateless-ротация по ISO-номеру недели), с памятью тем
+// прошлых выпусков (news_fake_posts) как ban-листом. Ручной запуск (/news fake) и
+// пятничный cron-слот (fallback на обычный Post при ошибке — в вызывающем коде).
 func (d *Digester) PostFake(ctx context.Context, chatID int64) error {
 	system := prompts.Get(prompts.FakeNews)
 	if system == "" {
 		return fmt.Errorf("fake news: empty prompt %s", prompts.FakeNews)
 	}
-	resp, _, _, err := d.llm.Chat(ctx, []llm.Message{
+	now := time.Now()
+	rubric := pickRubric(now)
+	past, err := d.repo.ListFake(ctx, chatID, fakeMemoryIssues)
+	if err != nil {
+		slog.Warn("fake news memory read", "err", err)
+	}
+	user := buildFakeUserMessage(now, rubric, extractFakeHeadlines(bodiesOf(past)))
+	resp, _, _, err := d.llmFake.Chat(ctx, []llm.Message{
 		{Role: "system", Content: system},
-		{Role: "user", Content: "Выпуск от " + time.Now().Format("02.01.2006") + "."},
+		{Role: "user", Content: user},
 	})
 	if err != nil {
 		return fmt.Errorf("fake news llm: %w", err)
@@ -72,6 +244,15 @@ func (d *Digester) PostFake(ctx context.Context, chatID int64) error {
 	}
 	if err := d.api.PostMessage(ctx, chatID, assembleFakePost(body)); err != nil {
 		return fmt.Errorf("post fake news: %w", err)
+	}
+	// Память только после успешного поста: err не возвращаем — cron-fallback иначе
+	// запостил бы обычный дайджест поверх уже вышедшего фейка. Сохраняем тело после
+	// того же капа, что видит чат (память ≡ опубликованное), под свежим контекстом —
+	// ctx ручного вызова мог почти истечь к моменту записи.
+	ctxSave, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := d.repo.SaveFake(ctxSave, chatID, rubric.ID, capFakeBody(body, fakeBodyBudget())); err != nil {
+		slog.Warn("fake news memory write", "err", err)
 	}
 	return nil
 }
@@ -127,11 +308,13 @@ func sanitizeFakeBody(resp string) string {
 	return strings.Join(blocks, "\n\n")
 }
 
+// fakeBodyBudget — бюджет UTF-16 на тело поста (лимит TG минус шапка и разделитель).
+func fakeBodyBudget() int { return fakePostMaxUTF16 - md.UTF16Len(digestTitle) - 2 }
+
 // assembleFakePost собирает пост: заголовок обычного дайджеста + тело в пределах
 // лимита TG. Маркеров выдуманности нет — выпуск неотличим от обычного.
 func assembleFakePost(body string) string {
-	budget := fakePostMaxUTF16 - md.UTF16Len(digestTitle) - 2
-	return digestTitle + "\n\n" + capFakeBody(body, budget)
+	return digestTitle + "\n\n" + capFakeBody(body, fakeBodyBudget())
 }
 
 // capFakeBody ужимает тело до budget UTF-16: блоки копятся целиком ("\n\n" = 2), блок,

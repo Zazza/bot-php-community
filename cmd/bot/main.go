@@ -142,7 +142,7 @@ func main() {
 	annivSched := anniv.New(msgRepo, llmClient, poster, cfg.ChatIDs)
 
 	newsRepo := news.NewRepository(dbx)
-	newsDigester := news.NewDigester(llmCheap, newsRepo, poster, cfg.ChatIDs, news.DefaultSources(), cfg.FakeNewsEnabled)
+	newsDigester := news.NewDigester(llmCheap, llmClient, newsRepo, poster, cfg.ChatIDs, news.DefaultSources(), cfg.FakeNewsEnabled)
 
 	announceSvc := announce.New(b, cfg.AdminIDs, cfg.ChatIDs[0])
 
