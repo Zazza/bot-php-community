@@ -131,6 +131,23 @@ func TestSanitizeFakeBody(t *testing.T) {
 			t.Fatalf("sanitize = %q, want \"\"", got)
 		}
 	})
+	t.Run("текст без ссылок (вступление/заключение) дропается, статьи целы", func(t *testing.T) {
+		in := "Вот и пятница, собрали для вас подборку!\n\n[A](https://php.net/a) описание\n\nСпасибо, что читаете."
+		got := sanitizeFakeBody(in)
+		if strings.Contains(got, "подборку") || strings.Contains(got, "Спасибо") {
+			t.Fatalf("бесконтентный текст не дропнут: %q", got)
+		}
+		if !strings.Contains(got, "[A]") {
+			t.Fatalf("статья потеряна: %q", got)
+		}
+	})
+	t.Run("отдельный блок-заголовок секции пакетов сохраняется", func(t *testing.T) {
+		in := "[A](https://php.net/a) описание\n\n📦 **Новые пакеты**\n\n• [v/p](https://packagist.org/packages/v/p) — desc"
+		got := sanitizeFakeBody(in)
+		if !strings.Contains(got, "📦 **Новые пакеты**") {
+			t.Fatalf("заголовок секции пакетов потерян: %q", got)
+		}
+	})
 	t.Run("мусор/пусто", func(t *testing.T) {
 		for _, in := range []string{"", "SKIP", "\n\n\n"} {
 			if got := sanitizeFakeBody(in); got != "" {
@@ -469,6 +486,17 @@ func TestFakePromptContract(t *testing.T) {
 			"нет маркера «в тематике рубрики» — рубрика недели не доходит до LLM"},
 		{"no_old_topic_funnel", !strings.Contains(p, "Темы пародии"),
 			"вернулась воронка тем «Темы пародии» из фейк-1.0 — подменяет рубрику недели"},
+		// v3: комический механизм + few-shot якоря (регрессия «юмора нет совсем»).
+		{"comic_mechanism", strings.Contains(p, "комический механизм"),
+			"нет секции комического механизма — deadpan без мотора = сухие новости"},
+		{"deadpan_not_dry", strings.Contains(p, "«серьёзно» ≠ «сухо»"),
+			"нет маркера «серьёзно ≠ сухо» — разрешение на шутку внутри серьёзной подачи"},
+		{"funnel_of_boredom_banned", strings.Contains(p, "НЕ смешная новость — брак"),
+			"нет критерия брака «правдоподобная, но не смешная» — модель сыплет сухятину"},
+		{"fewshot_tone_examples", strings.Contains(p, "Примеры ТОНА"),
+			"нет few-shot примеров тона — регистр юмора не показан модели"},
+		{"fewshot_marked_used_forever", strings.Contains(p, "использованными навсегда"),
+			"примеры не помечены использованными — LLM будет копировать их еженедельно"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -476,6 +504,34 @@ func TestFakePromptContract(t *testing.T) {
 				t.Error(c.msg)
 			}
 		})
+	}
+}
+
+// TestFakePromptFewShotsSanitizeSafe — few-shot примеры тона переживают санитайзер:
+// нет МЕТА-маркеров выдуманности, все ссылки из white-списка fakeHosts, end-to-end
+// sanitizeFakeBody по блоку примеров не пуст. Если LLM скопирует пример почти дословно,
+// блок не будет дропнут.
+func TestFakePromptFewShotsSanitizeSafe(t *testing.T) {
+	p := prompts.Get(prompts.FakeNews)
+	start := strings.Index(p, "Примеры ТОНА")
+	end := strings.Index(p, "Задача:")
+	if start < 0 || end < 0 || end < start {
+		t.Fatalf("нет блока примеров: start=%d end=%d", start, end)
+	}
+	block := strings.TrimSpace(p[start:end])
+	ex := strings.ToLower(block)
+	for _, m := range fakeMetaMarkers {
+		if strings.Contains(ex, m) {
+			t.Errorf("few-shot содержит МЕТА-маркер %q — копия примера будет дропнута санитайзером", m)
+		}
+	}
+	for _, m := range mdLinkRe.FindAllStringSubmatch(block, -1) {
+		if !fakeHostAllowed(m[1]) {
+			t.Errorf("ссылка примера вне white-списка: %s", m[1])
+		}
+	}
+	if got := sanitizeFakeBody(block); got == "" {
+		t.Error("sanitizeFakeBody дропнул весь блок примеров — копия примера не переживёт санитайзер")
 	}
 }
 

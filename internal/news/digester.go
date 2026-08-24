@@ -53,11 +53,15 @@ func freshCutoff(now time.Time, fakeEnabled bool) time.Time {
 // пятничный не отличается от обычного даже шапкой.
 const digestTitle = "📰 **PHP-дайджест**"
 
+// packagesSectionHeader — литерал заголовка секции пакетов: assembleDigest собирает его
+// сам, пятничный выпуск — из ответа LLM (санитайзер сохраняет блок, равный литералу).
+const packagesSectionHeader = "📦 **Новые пакеты**"
+
 // Digester собирает PHP-дайджест: фетч фидов → дедуп → LLM-куратория → пост.
 type Digester struct {
 	sources     []Source
 	llm         *llm.LLMClient
-	llmFake     *llm.LLMClient // умная: пятничный фейк-выпуск
+	llmFake     *llm.LLMClient // умная с творческой температурой (temp≈0.9): пятничный фейк-выпуск
 	repo        *Repository
 	api         Poster
 	chatIDs     []int64
@@ -66,7 +70,8 @@ type Digester struct {
 }
 
 // NewDigester создаёт Digester. sources=nil → DefaultSources. llmFake — умная модель
-// пятничного фейк-выпуска; fakeEnabled — рубрика вместо обычного дайджеста по пятницам.
+// с творческой температурой для пятничного фейк-выпуска; fakeEnabled — рубрика вместо
+// обычного дайджеста по пятницам.
 func NewDigester(llm, llmFake *llm.LLMClient, repo *Repository, api Poster, chatIDs []int64, sources []Source, fakeEnabled bool) *Digester {
 	if len(sources) == 0 {
 		sources = DefaultSources()
@@ -442,7 +447,7 @@ func assembleDigest(artText, pkgText string) string {
 		b.WriteString(artText)
 	}
 	if pkgText != "" {
-		b.WriteString("\n\n📦 **Новые пакеты**\n")
+		b.WriteString("\n\n" + packagesSectionHeader + "\n")
 		b.WriteString(pkgText)
 	}
 	return b.String()

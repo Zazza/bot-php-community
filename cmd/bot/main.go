@@ -65,6 +65,7 @@ func main() {
 	defer dbx.Close()
 
 	llmClient := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModel, 2048, 0)     // умная: ответы /ask + модерация-судья + анти-спам (temp=0: детерминированно)
+	llmFake := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModel, 2048, 0.9)     // умная+творческая: пятничный фейк-выпуск (юмор на temp=0 сохнет)
 	llmCheap := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModelCheap, 2048, 0) // дешёвая: faq/digest/темы
 	embedder := llm.NewEmbedder(cfg.LLMURL, cfg.LLMAPIKey, cfg.EmbedModel)
 
@@ -142,7 +143,7 @@ func main() {
 	annivSched := anniv.New(msgRepo, llmClient, poster, cfg.ChatIDs)
 
 	newsRepo := news.NewRepository(dbx)
-	newsDigester := news.NewDigester(llmCheap, llmClient, newsRepo, poster, cfg.ChatIDs, news.DefaultSources(), cfg.FakeNewsEnabled)
+	newsDigester := news.NewDigester(llmCheap, llmFake, newsRepo, poster, cfg.ChatIDs, news.DefaultSources(), cfg.FakeNewsEnabled)
 
 	announceSvc := announce.New(b, cfg.AdminIDs, cfg.ChatIDs[0])
 
