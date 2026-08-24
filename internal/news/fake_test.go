@@ -260,15 +260,19 @@ func TestCapFakeBody(t *testing.T) {
 	})
 }
 
-// TestPickRubric — stateless-ротация по ISO-неделе: детерминизм, дни одной недели
-// дают одну рубрику (ручной /news fake в вс ≡ cron-слот пятницы), соседние недели —
-// разные, 12 последовательных пятниц покрывают пул без повторов.
-func TestPickRubric(t *testing.T) {
-	monday := time.Date(2026, 1, 5, 20, 0, 0, 0, time.UTC) // пн ISO-недели 2026-W02
-	if monday.Weekday() != time.Monday {
-		t.Fatalf("премисса: 2026-01-05 = %v, want Monday", monday.Weekday())
+// TestPickFakePlan — stateless-план «2+2» по ISO-неделе: детерминизм, дни одной
+// недели дают один план целиком (ручной /news fake в вс ≡ cron-слот пятницы),
+// соседние недели меняют и якорь, и extras, 12 последовательных пятниц покрывают
+// пул якорей без повторов, extras следуют смещениям +3/+7 от номера недели,
+// все три рубрики плана попарно различны (в т.ч. на стыках 12-недельного цикла).
+func TestPickFakePlan(t *testing.T) {
+	friday := time.Date(2026, 1, 2, 20, 0, 0, 0, time.UTC) // пятница ISO-недели 2026-W01
+	if friday.Weekday() != time.Friday {
+		t.Fatalf("премисса: 2026-01-02 = %v, want Friday", friday.Weekday())
 	}
-	friday := monday.AddDate(0, 0, 4)
+	if y, w := friday.ISOWeek(); y != 2026 || w != 1 {
+		t.Fatalf("премисса: ISOWeek(2026-01-02) = %d-W%02d, want 2026-W01", y, w)
+	}
 
 	cases := []struct {
 		name      string
@@ -276,38 +280,49 @@ func TestPickRubric(t *testing.T) {
 		wantEqual bool
 	}{
 		{"same_date_deterministic", friday, friday, true},
-		{"friday_vs_sunday_same_iso_week", friday, monday.AddDate(0, 0, 6), true},
+		{"friday_vs_sunday_same_iso_week", friday, friday.AddDate(0, 0, 2), true},
 		{"adjacent_iso_weeks_differ", friday, friday.AddDate(0, 0, 7), false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ra, rb := pickRubric(c.a), pickRubric(c.b)
-			if equal := ra.ID == rb.ID; equal != c.wantEqual {
-				t.Errorf("pickRubric(%v) = %q, pickRubric(%v) = %q, wantEqual = %v",
-					c.a.Format("2006-01-02"), ra.ID, c.b.Format("2006-01-02"), rb.ID, c.wantEqual)
+			pa, pb := pickFakePlan(c.a), pickFakePlan(c.b)
+			if equal := reflect.DeepEqual(pa, pb); equal != c.wantEqual {
+				t.Errorf("планы %v/%v equal = %v, want %v (якоря %q/%q)",
+					c.a.Format("2006-01-02"), c.b.Format("2006-01-02"), equal, c.wantEqual, pa.Anchor.ID, pb.Anchor.ID)
+			}
+			if c.wantEqual {
+				return
+			}
+			if pa.Anchor.ID == pb.Anchor.ID {
+				t.Errorf("планы %v/%v: якорь не сменился (%q)",
+					c.a.Format("2006-01-02"), c.b.Format("2006-01-02"), pa.Anchor.ID)
+			}
+			if reflect.DeepEqual(pa.Extras, pb.Extras) {
+				t.Errorf("планы %v/%v: extras не сменились (%q, %q)",
+					c.a.Format("2006-01-02"), c.b.Format("2006-01-02"), pa.Extras[0].ID, pa.Extras[1].ID)
 			}
 		})
 	}
 
-	t.Run("twelve_fridays_full_pool_no_repeats", func(t *testing.T) {
+	t.Run("twelve_fridays_full_pool", func(t *testing.T) {
 		seen := make(map[string]struct{}, len(fakeRubrics))
 		for i := 0; i < len(fakeRubrics); i++ {
 			d := friday.AddDate(0, 0, 7*i)
 			if d.Weekday() != time.Friday {
 				t.Fatalf("премисса: итерация %d дала %v, want Friday", i, d.Weekday())
 			}
-			id := pickRubric(d).ID
+			id := pickFakePlan(d).Anchor.ID
 			if _, dup := seen[id]; dup {
-				t.Fatalf("неделя %v: рубрика %q повторилась — ротация сломана", d.Format("2006-01-02"), id)
+				t.Fatalf("неделя %v: якорь %q повторился — ротация сломана", d.Format("2006-01-02"), id)
 			}
 			seen[id] = struct{}{}
 		}
 		if len(seen) != len(fakeRubrics) {
-			t.Errorf("за %d недель покрыто рубрик = %d, want %d (полный пул)", len(fakeRubrics), len(seen), len(fakeRubrics))
+			t.Errorf("за %d недель покрыто якорей = %d, want %d (полный пул)", len(fakeRubrics), len(seen), len(fakeRubrics))
 		}
 	})
 
-	t.Run("anchor_2026_01_01_iso_week_1_releases", func(t *testing.T) {
+	t.Run("anchor_2026_01_01_releases", func(t *testing.T) {
 		anchor := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 		y, w := anchor.ISOWeek()
 		if y != 2026 || w != 1 {
@@ -316,14 +331,108 @@ func TestPickRubric(t *testing.T) {
 		if want := fakeRubrics[w%len(fakeRubrics)].ID; want != "releases" {
 			t.Fatalf("премисса: fakeRubrics[%d].ID = %q, want \"releases\"", w%len(fakeRubrics), want)
 		}
-		if got := pickRubric(anchor).ID; got != "releases" {
-			t.Errorf("pickRubric(2026-01-01).ID = %q, want \"releases\" (ISO week 1)", got)
+		if got := pickFakePlan(anchor).Anchor.ID; got != "releases" {
+			t.Errorf("pickFakePlan(2026-01-01).Anchor.ID = %q, want \"releases\" (ISO week 1)", got)
+		}
+	})
+
+	t.Run("extras_contract_offsets", func(t *testing.T) {
+		// Формулу смещений проверяем от ISOWeek самой даты, ID — из самого пула.
+		weeks := make(map[int]struct{})
+		for i := 0; i < len(fakeRubrics)+2; i++ {
+			d := friday.AddDate(0, 0, 7*i)
+			_, w := d.ISOWeek()
+			weeks[w] = struct{}{}
+			got := pickFakePlan(d)
+			if len(got.Extras) != 2 {
+				t.Fatalf("неделя %d: len(Extras) = %d, want 2", w, len(got.Extras))
+			}
+			want0 := fakeRubrics[(w+3)%len(fakeRubrics)].ID
+			want1 := fakeRubrics[(w+7)%len(fakeRubrics)].ID
+			if got.Extras[0].ID != want0 || got.Extras[1].ID != want1 {
+				t.Errorf("неделя %d: Extras = [%s, %s], want [%s, %s] (смещения +3/+7)",
+					w, got.Extras[0].ID, got.Extras[1].ID, want0, want1)
+			}
+		}
+		for _, seam := range []int{10, 11, 12} { // (w+3)%12 заворачивает через границу пула
+			if _, ok := weeks[seam]; !ok {
+				t.Errorf("премисса: стык цикла w=%d не покрыт выборкой недель", seam)
+			}
+		}
+	})
+
+	t.Run("three_distinct_rubrics", func(t *testing.T) {
+		for i := 0; i < len(fakeRubrics)+2; i++ {
+			d := friday.AddDate(0, 0, 7*i)
+			_, w := d.ISOWeek()
+			p := pickFakePlan(d)
+			ids := []string{p.Anchor.ID, p.Extras[0].ID, p.Extras[1].ID}
+			for a := 0; a < len(ids); a++ {
+				for b := a + 1; b < len(ids); b++ {
+					if ids[a] == ids[b] {
+						t.Errorf("неделя %d: рубрики плана совпали (%q) — якорь и extras обязаны быть тремя разными",
+							w, ids[a])
+					}
+				}
+			}
+		}
+	})
+}
+
+// TestFakeRubricKey — ключ плана «anchor+extra1+extra2» для news_fake_posts.rubric:
+// состав недели 2026-W01 (якорь releases + две extras по смещениям +3/+7), якорь
+// первым, ровно три компоненты, детерминизм. ID extras вычисляются из самого пула —
+// строки extras в тесте не захардкожены.
+func TestFakeRubricKey(t *testing.T) {
+	day := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	_, w := day.ISOWeek()
+	if w != 1 {
+		t.Fatalf("премисса: ISOWeek(2026-01-01) = %d, want 1", w)
+	}
+	if anchor := fakeRubrics[w%len(fakeRubrics)].ID; anchor != "releases" {
+		t.Fatalf("премисса: fakeRubrics[%d].ID = %q, want \"releases\"", w%len(fakeRubrics), anchor)
+	}
+	want := strings.Join([]string{
+		"releases",
+		fakeRubrics[(w+3)%len(fakeRubrics)].ID,
+		fakeRubrics[(w+7)%len(fakeRubrics)].ID,
+	}, "+")
+
+	t.Run("week1_releases_plus_extras", func(t *testing.T) {
+		if got := fakeRubricKey(pickFakePlan(day)); got != want {
+			t.Errorf("fakeRubricKey(2026-01-01) = %q, want %q", got, want)
+		}
+	})
+
+	friday := time.Date(2026, 1, 2, 20, 0, 0, 0, time.UTC) // пятница ISO-недели 2026-W01
+	t.Run("anchor_first_three_parts", func(t *testing.T) {
+		for i := 0; i < len(fakeRubrics)+2; i++ {
+			d := friday.AddDate(0, 0, 7*i)
+			p := pickFakePlan(d)
+			key := fakeRubricKey(p)
+			if !strings.HasPrefix(key, p.Anchor.ID) {
+				t.Errorf("%v: ключ %q не начинается с якоря %q", d.Format("2006-01-02"), key, p.Anchor.ID)
+			}
+			if !strings.HasSuffix(key, p.Extras[len(p.Extras)-1].ID) {
+				t.Errorf("%v: ключ %q не кончается последней extra %q", d.Format("2006-01-02"), key, p.Extras[len(p.Extras)-1].ID)
+			}
+			if n := strings.Count(key, "+"); n != len(p.Extras) {
+				t.Errorf("%v: ключ %q: разделителей \"+\" = %d, want %d", d.Format("2006-01-02"), key, n, len(p.Extras))
+			}
+		}
+	})
+
+	t.Run("deterministic", func(t *testing.T) {
+		if fakeRubricKey(pickFakePlan(day)) != fakeRubricKey(pickFakePlan(day)) {
+			t.Error("ключ плана не детерминирован для одной даты")
 		}
 	})
 }
 
 // TestFakeRubricsRender — пул рубрик консистентен: непустые поля (рубрика попадает в
-// user-сообщение целиком), уникальные ID (стабильный ключ в news_fake_posts.rubric).
+// user-сообщение целиком), уникальные ID (стабильный ключ в news_fake_posts.rubric),
+// поля без МЕТА-маркеров выдуманности (Brief/Tone уходят в user-сообщение — эхо
+// маркера в тело дропнулось бы санитайзером).
 func TestFakeRubricsRender(t *testing.T) {
 	if len(fakeRubrics) < 8 {
 		t.Errorf("len(fakeRubrics) = %d, want >= 8 (разнообразие ротации)", len(fakeRubrics))
@@ -335,6 +444,14 @@ func TestFakeRubricsRender(t *testing.T) {
 		}
 		if _, dup := ids[r.ID]; dup {
 			t.Errorf("fakeRubrics[%d]: дубликат ID %q — память выпусков не различит рубрики", i, r.ID)
+		}
+		for _, field := range []string{r.Title, r.Brief, r.Tone} {
+			low := strings.ToLower(field)
+			for _, m := range fakeMetaMarkers {
+				if strings.Contains(low, m) {
+					t.Errorf("fakeRubrics[%d] (%q): МЕТА-маркер %q в поле рубрики — эхо в теле дропнет блок", i, r.ID, m)
+				}
+			}
 		}
 		ids[r.ID] = struct{}{}
 	}
@@ -356,7 +473,9 @@ func TestExtractFakeHeadlines(t *testing.T) {
 
 	var totalCapBody strings.Builder
 	for i := 0; ; i++ {
-		h := strings.Repeat("т", 100) // 100 рун каждый: total-кап раньше count-капа
+		// 100 рун и уникальный текст: иначе дедуп схлопнет всё в один заголовок и
+		// total-кап не сработает.
+		h := fmt.Sprintf("%s %d", strings.Repeat("т", 97), i)
 		fmt.Fprintf(&totalCapBody, "[%s](https://php.net/t%d)\n", h, i)
 		if (i+1)*100 > fakeRecentTotalRunes {
 			break
@@ -400,7 +519,7 @@ func TestExtractFakeHeadlines(t *testing.T) {
 				// бюджета, заголовков меньше, чем ссылок во входе.
 				total := 0
 				for _, h := range got {
-					total += len(h)
+					total += len([]rune(h))
 				}
 				if total > fakeRecentTotalRunes+fakeHeadlineMaxRunes {
 					t.Fatalf("total-кап не сработал: %d заголовков, %d рун", len(got), total)
@@ -423,25 +542,54 @@ func TestExtractFakeHeadlines(t *testing.T) {
 	}
 }
 
-// TestBuildFakeUserMessage — user-сообщение: дата, рубрика целиком, ban-лист тем
-// построчно; без тем блока «НЕ повторяй» нет; без сырых плейсхолдеров.
+// TestBuildFakeUserMessage — user-сообщение: дата, распределение статей по рубрикам
+// плана «2+2» (якорь — статьи 1 и 2, extras — статьи 3 и 4, в этом порядке), пакеты
+// вне рубрик, ban-лист тем построчно; без тем блока «НЕ повторяй» нет; без сырых
+// плейсхолдеров.
 func TestBuildFakeUserMessage(t *testing.T) {
-	day := time.Date(2026, 1, 9, 20, 0, 0, 0, time.UTC)
-	rubric := fakeRubrics[0]
+	day := time.Date(2026, 8, 21, 20, 0, 0, 0, time.UTC) // пятница ISO-недели 2026-W34
+	plan := fakePlan{Anchor: fakeRubrics[0], Extras: []fakeRubric{fakeRubrics[1], fakeRubrics[2]}}
 	recent := []string{"Тема один", "Тема два"}
 
-	t.Run("with_recent_full_contract", func(t *testing.T) {
-		got := buildFakeUserMessage(day, rubric, recent)
-		for _, sub := range []string{"09.01.2026", rubric.Title, rubric.Brief, rubric.Tone, "НЕ повторяй", "- Тема один", "- Тема два"} {
+	t.Run("full_contract", func(t *testing.T) {
+		got := buildFakeUserMessage(day, plan, recent)
+		must := []string{
+			"21.08.2026",
+			"Распределение статей по рубрикам:",
+			"- Статьи 1 и 2 — якорная рубрика выпуска",
+			"- Статья 3 — рубрика",
+			"- Статья 4 (если она есть) — рубрика",
+			"Пакеты — без привязки к рубрикам: любая тема PHP-экосистемы.",
+			plan.Anchor.Title, plan.Anchor.Brief, plan.Anchor.Tone,
+			plan.Extras[0].Title, plan.Extras[0].Tone,
+			plan.Extras[1].Title, plan.Extras[1].Tone,
+			"Темы прошлых выпусков — НЕ повторяй их и близкие вариации:",
+			"- Тема один", "- Тема два",
+		}
+		for _, sub := range must {
 			if !strings.Contains(got, sub) {
 				t.Errorf("user-сообщение без %q:\n%s", sub, got)
 			}
 		}
 	})
 
+	t.Run("anchor_first", func(t *testing.T) {
+		got := buildFakeUserMessage(day, plan, recent)
+		anchor := strings.Index(got, "- Статьи 1 и 2 — якорная рубрика выпуска")
+		third := strings.Index(got, "- Статья 3 — рубрика")
+		fourth := strings.Index(got, "- Статья 4 (если она есть) — рубрика")
+		if anchor < 0 || third < 0 || fourth < 0 {
+			t.Fatalf("нет строк распределения: якорь=%d статья3=%d статья4=%d\n%s", anchor, third, fourth, got)
+		}
+		if !(anchor < third && third < fourth) {
+			t.Errorf("порядок рубрик: якорь=%d, статья3=%d, статья4=%d, want якорь < статья3 < статья4",
+				anchor, third, fourth)
+		}
+	})
+
 	t.Run("without_recent_no_banlist_block", func(t *testing.T) {
 		for _, rec := range [][]string{nil, {}} {
-			got := buildFakeUserMessage(day, rubric, rec)
+			got := buildFakeUserMessage(day, plan, rec)
 			if strings.Contains(got, "НЕ повторяй") {
 				t.Errorf("recent=%v (пусто), а блок ban-листа тем есть:\n%s", rec, got)
 			}
@@ -450,7 +598,7 @@ func TestBuildFakeUserMessage(t *testing.T) {
 
 	t.Run("no_raw_placeholders", func(t *testing.T) {
 		for _, rec := range [][]string{recent, nil} {
-			got := buildFakeUserMessage(day, rubric, rec)
+			got := buildFakeUserMessage(day, plan, rec)
 			for _, ph := range []string{"%s", "%d"} {
 				if strings.Contains(got, ph) {
 					t.Errorf("user-сообщение с сырым плейсхолдером %q:\n%s", ph, got)
@@ -460,7 +608,7 @@ func TestBuildFakeUserMessage(t *testing.T) {
 	})
 }
 
-// TestFakePromptContract — контракт промпта фейк-дайджеста 2.0: статичен (без
+// TestFakePromptContract — контракт промпта фейк-дайджеста (v4, гибрид «2+2»): статичен (без
 // плейсхолдеров — вся динамика идёт user-сообщением, анти-инъекция), SAFETY первой
 // строкой, рубрика приходит из user-сообщения. Старая воронка тем 1.0 («Темы
 // пародии: …» — фиксированный список, игнорирующий рубрику недели) не должна
@@ -482,8 +630,8 @@ func TestFakePromptContract(t *testing.T) {
 			"промпт содержит \"%s\" — динамика обязана идти user-сообщением, не Sprintf"},
 		{"static_no_d_placeholder", !strings.Contains(p, "%d"),
 			"промпт содержит \"%d\" — динамика обязана идти user-сообщением, не Sprintf"},
-		{"rubric_marker", strings.Contains(p, "в тематике рубрики"),
-			"нет маркера «в тематике рубрики» — рубрика недели не доходит до LLM"},
+		{"rubric_marker", strings.Contains(p, "в тематике своей рубрики"),
+			"нет маркера «в тематике своей рубрики» — рубрики плана не доходит до LLM"},
 		{"no_old_topic_funnel", !strings.Contains(p, "Темы пародии"),
 			"вернулась воронка тем «Темы пародии» из фейк-1.0 — подменяет рубрику недели"},
 		// v3: комический механизм + few-shot якоря (регрессия «юмора нет совсем»).
@@ -497,6 +645,13 @@ func TestFakePromptContract(t *testing.T) {
 			"нет few-shot примеров тона — регистр юмора не показан модели"},
 		{"fewshot_marked_used_forever", strings.Contains(p, "использованными навсегда"),
 			"примеры не помечены использованными — LLM будет копировать их еженедельно"},
+		// v4: гибрид «2+2» — распределение статей по рубрикам задаёт user-сообщение.
+		{"rubric_distribution", strings.Contains(p, "статьи 1–2 — якорная рубрика"),
+			"нет якоря «статьи 1–2 — якорная рубрика» — LLM не знает, что статьи 1–2 идут в якорь"},
+		{"packages_unbound", strings.Contains(p, "Пакеты — без привязки к рубрикам"),
+			"нет «Пакеты — без привязки к рубрикам» — пакеты привяжутся к рубрикам плана"},
+		{"three_articles_no_fourth", strings.Contains(p, "если статей три, четвёртой не ищи"),
+			"нет «если статей три, четвёртой не ищи» — LLM выдумывает четвёртую статью"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

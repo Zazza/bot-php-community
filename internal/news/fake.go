@@ -61,19 +61,19 @@ type fakeRubric struct {
 	Tone  string // акцент тона для этой рубрики
 }
 
-// fakeRubrics — пул рубрик; рубрика недели = fakeRubrics[ISOWeek%len] (stateless-ротация,
+// fakeRubrics — пул рубрик; якорь недели = fakeRubrics[ISOWeek%len] (stateless-ротация,
 // 12 рубрик ≈ квартальный цикл без хранения состояния).
 var fakeRubrics = []fakeRubric{
 	{
 		ID:    "unusual",
 		Title: "Необычное применение PHP",
-		Brief: "Вымышленные, но реалистичные кейсы PHP вне веба: станок с ЧПУ под управлением PHP-демона, метеостанция на Raspberry Pi, умный аквариум с автодоливом, телеметрия дрона, сервер для ретро-игр, касса в пекарне, автополив теплицы.",
+		Brief: "Несуществующие, но реалистичные кейсы PHP вне веба: станок с ЧПУ под управлением PHP-демона, метеостанция на Raspberry Pi, умный аквариум с автодоливом, телеметрия дрона, сервер для ретро-игр, касса в пекарне, автополив теплицы.",
 		Tone:  "Техническая конкретика приборов и железа: датчики, порты, протоколы, миллисекунды; юмор — в невозмутимой серьёзности, с которой PHP берётся за задачу любого масштаба.",
 	},
 	{
 		ID:    "releases",
 		Title: "Релизы и RFC ядра",
-		Brief: "Несуществующие релизы PHP и вымышленные RFC: курьёзные строки changelog, предложения по ядру, голосования за синтаксис, депрекации древних фич, релиз-менеджеры-герои.",
+		Brief: "Несуществующие релизы PHP и придуманные RFC: курьёзные строки changelog, предложения по ядру, голосования за синтаксис, депрекации древних фич, релиз-менеджеры-герои.",
 		Tone:  "Сдержанный тон официальных релиз-ноутов; юмор — в абсолютно серьёзной мотивации заведомо странных изменений.",
 	},
 	{
@@ -85,7 +85,7 @@ var fakeRubrics = []fakeRubric{
 	{
 		ID:    "composer",
 		Title: "Composer и пакетный ад",
-		Brief: "Зависимости и пакетный менеджмент: вымышленные пакеты с неожиданными транзитивными зависимостями, конфликты версий, чудеса автолоада, зеркала-призраки, lock-файл от разработчика, который уволился.",
+		Brief: "Зависимости и пакетный менеджмент: несуществующие пакеты с неожиданными транзитивными зависимостями, конфликты версий, чудеса автолоада, зеркала-призраки, lock-файл от разработчика, который уволился.",
 		Tone:  "Тон усталого смирения перед деревом зависимостей; юмор — в гордости за распутанные 400 пакетов ради одной функции.",
 	},
 	{
@@ -97,13 +97,13 @@ var fakeRubrics = []fakeRubric{
 	{
 		ID:    "frameworks",
 		Title: "Фреймворк-войны",
-		Brief: "Вымышленные фреймворки-пародии (НЕ реальные имена): релизы, миграции с фреймворка на фреймворк, бенчмарки hello-world, обратная совместимость, документация, опаздывающая на релиз.",
+		Brief: "Несуществующие фреймворки-пародии (НЕ реальные имена): релизы, миграции с фреймворка на фреймворк, бенчмарки hello-world, обратная совместимость, документация, опаздывающая на релиз.",
 		Tone:  "Тон военных сводок с фронтов чужих релизов; юмор — в серьёзной аналитике надуманных противостояний.",
 	},
 	{
 		ID:    "interview",
 		Title: "Собеседования и найм",
-		Brief: "Вымышленные задачи и кейсы с собеседований: прожарки, вопросы про замыкания на позицию в пекарню, тестовые на неделю, белые доски, зарплатные вилки и офферы.",
+		Brief: "Придуманные задачи и кейсы с собеседований: прожарки, вопросы про замыкания на позицию в пекарню, тестовые на неделю, белые доски, зарплатные вилки и офферы.",
 		Tone:  "Тон протокола диалога с рекрутером; юмор — в абсурдно завышенных требованиях к простым ролям.",
 	},
 	{
@@ -115,33 +115,63 @@ var fakeRubrics = []fakeRubric{
 	{
 		ID:    "security",
 		Title: "Security-зоопарк",
-		Brief: "Вымышленные CVE и advisory: странные векторы атак, патчи безопасности, ответственные раскрытия, эскалации через php.ini, санитайзеры и обфускация.",
+		Brief: "Несуществующие CVE и advisory: странные векторы атак, патчи безопасности, ответственные раскрытия, эскалации через php.ini, санитайзеры и обфускация.",
 		Tone:  "Тон срочного бюллетеня безопасности; юмор — в серьёзном CVSS-скоринге ничтожной уязвимости.",
 	},
 	{
 		ID:    "tooling",
 		Title: "Инструменты и CI",
-		Brief: "Линтеры, статанализ и CI: вымышленные анализаторы, драконовские правила кодстайла, пайплайны, собирающиеся дольше, чем живёт проект, все фиксы одним PR.",
+		Brief: "Линтеры, статанализ и CI: несуществующие анализаторы, драконовские правила кодстайла, пайплайны, собирающиеся дольше, чем живёт проект, все фиксы одним PR.",
 		Tone:  "Тон лендинга девтула с обещаниями; юмор — в машинной уверенности линтера, который прав всегда.",
 	},
 	{
 		ID:    "community",
 		Title: "Митапы и конференции",
-		Brief: "Вымышленные события PHP-мира: митап в бункере и на барже, CFP, закрывшийся раньше, чем открылся, доклад про легаси, который сам стал легаси к моменту выступления, стикеры, закончившиеся в первый час, кофе, которого хватило на половину зала, талисман конференции, сбежавший в город.",
+		Brief: "Придуманные события PHP-мира: митап в бункере и на барже, CFP, закрывшийся раньше, чем открылся, доклад про легаси, который сам стал легаси к моменту выступления, стикеры, закончившиеся в первый час, кофе, которого хватило на половину зала, талисман конференции, сбежавший в город.",
 		Tone:  "Тон афиши и репортажа с события; юмор — в трогательных организаторских деталях и неизбежном хаосе.",
 	},
 	{
 		ID:    "postmortem",
 		Title: "Прод-инциденты",
-		Brief: "Вымышленные постмортемы (компании без реальных имён): падение прода из-за одной строки, каскадные отказы, деплой в конце недели, откат отката, причину нашли в третьем дежурстве, uptime 99.99% — но не того сервиса, blameless-разбор, на котором все молча смотрели в пол.",
+		Brief: "Придуманные постмортемы (компании без реальных имён): падение прода из-за одной строки, каскадные отказы, деплой в конце недели, откат отката, причину нашли в третьем дежурстве, uptime 99.99% — но не того сервиса, blameless-разбор, на котором все молча смотрели в пол.",
 		Tone:  "Хроникальная точность таймлайна инцидента; юмор — в спокойной фиксации катастрофических решений.",
 	},
 }
 
-// pickRubric — рубрика недели детерминированно по ISO-номеру недели (stateless).
-func pickRubric(t time.Time) fakeRubric {
+// fakeExtraOffsets — смещения ISO-недели для дополнительных рубрик гибрида «2+2».
+// Инвариант: 3, 7 и разность 4 не кратны 12 → якорь и обе дополнительные — всегда
+// три РАЗНЫЕ рубрики при любом w.
+var fakeExtraOffsets = [2]int{3, 7}
+
+// fakePlan — план гибридного выпуска: якорь недели (2 статьи) + две дополнительные (1–2 статьи).
+type fakePlan struct {
+	Anchor fakeRubric   // = fakeRubrics[w%12] — обратная совместимость ротации
+	Extras []fakeRubric // ровно 2: fakeRubrics[(w+3)%12], fakeRubrics[(w+7)%12], в порядке смещений
+}
+
+// pickFakePlan — план выпуска детерминированно по ISO-номеру недели (stateless).
+func pickFakePlan(t time.Time) fakePlan {
 	_, w := t.ISOWeek()
-	return fakeRubrics[w%len(fakeRubrics)]
+	return fakePlan{
+		Anchor: fakeRubrics[w%len(fakeRubrics)],
+		Extras: []fakeRubric{
+			fakeRubrics[(w+fakeExtraOffsets[0])%len(fakeRubrics)],
+			fakeRubrics[(w+fakeExtraOffsets[1])%len(fakeRubrics)],
+		},
+	}
+}
+
+// fakeRubricKey — ключ плана в news_fake_posts.rubric (TEXT, без миграции):
+// "anchor+extra1+extra2", якорь первым. Колонку никто не парсит (бан-лист работает
+// по body через extractFakeHeadlines) — это наблюдаемость ротации в БД/логах;
+// старые строки с одним ID остаются валидной историей якорей.
+func fakeRubricKey(p fakePlan) string {
+	ids := make([]string, 0, len(p.Extras)+1)
+	ids = append(ids, p.Anchor.ID)
+	for _, r := range p.Extras {
+		ids = append(ids, r.ID)
+	}
+	return strings.Join(ids, "+")
 }
 
 const fakeMemoryIssues = 24       // сколько прошлых выпусков помним (2 цикла ротации 12 рубрик)
@@ -181,7 +211,7 @@ func extractFakeHeadlines(bodies []string) []string {
 			}
 			seen[h] = struct{}{}
 			out = append(out, h)
-			n += len(h)
+			n += len([]rune(h))
 			if len(out) >= fakeRecentHeadlines || n > fakeRecentTotalRunes {
 				return out
 			}
@@ -199,13 +229,20 @@ func bodiesOf(rows []FakeRow) []string {
 	return out
 }
 
-// buildFakeUserMessage — user-сообщение: дата, рубрика, ban-лист тем. Динамический
-// контент только здесь (промпт статичен — анти-инъекция).
-func buildFakeUserMessage(t time.Time, rubric fakeRubric, recent []string) string {
+// buildFakeUserMessage — user-сообщение: дата, распределение статей по рубрикам
+// плана, ban-лист тем. Динамический контент только здесь (промпт статичен —
+// анти-инъекция).
+func buildFakeUserMessage(t time.Time, plan fakePlan, recent []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Выпуск от %s.\n\n", t.Format("02.01.2006"))
-	fmt.Fprintf(&b, "Рубрика выпуска: %s.\n%s Весь выпуск держи в тематике рубрики.\nТон: %s\n",
-		rubric.Title, rubric.Brief, rubric.Tone)
+	b.WriteString("Распределение статей по рубрикам:\n")
+	fmt.Fprintf(&b, "- Статьи 1 и 2 — якорная рубрика выпуска «%s»: %s Тон: %s.\n",
+		plan.Anchor.Title, plan.Anchor.Brief, plan.Anchor.Tone)
+	fmt.Fprintf(&b, "- Статья 3 — рубрика «%s»: %s Тон: %s.\n",
+		plan.Extras[0].Title, plan.Extras[0].Brief, plan.Extras[0].Tone)
+	fmt.Fprintf(&b, "- Статья 4 (если она есть) — рубрика «%s»: %s Тон: %s.\n",
+		plan.Extras[1].Title, plan.Extras[1].Brief, plan.Extras[1].Tone)
+	b.WriteString("\nПакеты — без привязки к рубрикам: любая тема PHP-экосистемы.\n")
 	if len(recent) > 0 {
 		b.WriteString("\nТемы прошлых выпусков — НЕ повторяй их и близкие вариации:\n")
 		for _, h := range recent {
@@ -216,21 +253,22 @@ func buildFakeUserMessage(t time.Time, rubric fakeRubric, recent []string) strin
 }
 
 // PostFake генерирует и постит «пятничный выпуск» — шуточный полностью вымышленный
-// дайджест в рубрике недели (stateless-ротация по ISO-номеру недели), с памятью тем
-// прошлых выпусков (news_fake_posts) как ban-листом. Ручной запуск (/news fake) и
-// пятничный cron-слот (fallback на обычный Post при ошибке — в вызывающем коде).
+// дайджест по гибридному плану «2+2»: якорная рубрика недели (stateless-ротация по
+// ISO-номеру недели) + две дополнительные рубрики, с памятью тем прошлых выпусков
+// (news_fake_posts) как ban-листом. Ручной запуск (/news fake) и пятничный cron-слот
+// (fallback на обычный Post при ошибке — в вызывающем коде).
 func (d *Digester) PostFake(ctx context.Context, chatID int64) error {
 	system := prompts.Get(prompts.FakeNews)
 	if system == "" {
 		return fmt.Errorf("fake news: empty prompt %s", prompts.FakeNews)
 	}
 	now := time.Now()
-	rubric := pickRubric(now)
+	plan := pickFakePlan(now)
 	past, err := d.repo.ListFake(ctx, chatID, fakeMemoryIssues)
 	if err != nil {
 		slog.Warn("fake news memory read", "err", err)
 	}
-	user := buildFakeUserMessage(now, rubric, extractFakeHeadlines(bodiesOf(past)))
+	user := buildFakeUserMessage(now, plan, extractFakeHeadlines(bodiesOf(past)))
 	resp, _, _, err := d.llmFake.Chat(ctx, []llm.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
@@ -251,7 +289,7 @@ func (d *Digester) PostFake(ctx context.Context, chatID int64) error {
 	// ctx ручного вызова мог почти истечь к моменту записи.
 	ctxSave, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := d.repo.SaveFake(ctxSave, chatID, rubric.ID, capFakeBody(body, fakeBodyBudget())); err != nil {
+	if err := d.repo.SaveFake(ctxSave, chatID, fakeRubricKey(plan), capFakeBody(body, fakeBodyBudget())); err != nil {
 		slog.Warn("fake news memory write", "err", err)
 	}
 	return nil
