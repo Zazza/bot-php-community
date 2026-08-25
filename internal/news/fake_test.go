@@ -262,9 +262,9 @@ func TestCapFakeBody(t *testing.T) {
 
 // TestPickFakePlan — stateless-план «2+2» по ISO-неделе: детерминизм, дни одной
 // недели дают один план целиком (ручной /news fake в вс ≡ cron-слот пятницы),
-// соседние недели меняют и якорь, и extras, 12 последовательных пятниц покрывают
+// соседние недели меняют и якорь, и extras, последовательные пятницы покрывают
 // пул якорей без повторов, extras следуют смещениям +3/+7 от номера недели,
-// все три рубрики плана попарно различны (в т.ч. на стыках 12-недельного цикла).
+// все три рубрики плана попарно различны (в т.ч. на стыках цикла).
 func TestPickFakePlan(t *testing.T) {
 	friday := time.Date(2026, 1, 2, 20, 0, 0, 0, time.UTC) // пятница ISO-недели 2026-W01
 	if friday.Weekday() != time.Friday {
@@ -304,7 +304,7 @@ func TestPickFakePlan(t *testing.T) {
 		})
 	}
 
-	t.Run("twelve_fridays_full_pool", func(t *testing.T) {
+	t.Run("consecutive_fridays_full_pool", func(t *testing.T) {
 		seen := make(map[string]struct{}, len(fakeRubrics))
 		for i := 0; i < len(fakeRubrics); i++ {
 			d := friday.AddDate(0, 0, 7*i)
@@ -354,7 +354,7 @@ func TestPickFakePlan(t *testing.T) {
 					w, got.Extras[0].ID, got.Extras[1].ID, want0, want1)
 			}
 		}
-		for _, seam := range []int{10, 11, 12} { // (w+3)%12 заворачивает через границу пула
+		for _, seam := range []int{10, 11, 12} { // стык цикла (w%len заворачивает) покрыт выборкой
 			if _, ok := weeks[seam]; !ok {
 				t.Errorf("премисса: стык цикла w=%d не покрыт выборкой недель", seam)
 			}
