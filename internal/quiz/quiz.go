@@ -58,8 +58,10 @@ func (q *Quiz) Post(ctx context.Context, chatID int64) error {
 // отвечает тостом ✅/❌ и обновляет live-tally на сообщении. «Показать ответ» отвечает
 // модальным алертом — он виден ТОЛЬКО нажавшему, не срывает голосование и не исчезает
 // сам (в отличие от тоста); раскрывается лишь проголосовавшему (по quiz_ballots), сбой
-// БД — fail-closed, без раскрытия. Возвращает (текст, showAlert). Текст капируется
-// ≤200 UTF-16 — лимит Telegram answerCallbackQuery; при превышении алерт молча не покажется.
+// БД — fail-closed, без раскрытия. Возвращает (текст, showAlert). Текст собирается через
+// composeAlert под лимит 200 UTF-16 (Telegram answerCallbackQuery): приоритет — объяснению
+// «почему», под нож первой идёт декор-тэлли, пояснение режется по границе слова лишь если
+// само не влезает. При превышении лимита алерт молча не покажется.
 func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery) (string, bool) {
 	parts := strings.Split(cb.Data, ":") // quiz:<id>:<opt>
 	if len(parts) != 3 {
@@ -104,15 +106,13 @@ func (q *Quiz) HandleQuizCallback(ctx context.Context, cb *models.CallbackQuery)
 	opts := row.Opts()
 	picked := strings.TrimSpace(opts[choice])
 	right := strings.TrimSpace(opts[row.Correct])
-	var toast string
+	var head string
 	if choice == row.Correct {
-		toast = fmt.Sprintf("Ты выбрал %c) %s — ✅ Верно!", letters[choice], picked)
+		head = fmt.Sprintf("Ты выбрал %c) %s — ✅ Верно!", letters[choice], picked)
 	} else {
-		toast = fmt.Sprintf("Ты выбрал %c) %s — ❌. Правильно: %c) %s", letters[choice], picked, letters[row.Correct], right)
+		head = fmt.Sprintf("Ты выбрал %c) %s — ❌. Правильно: %c) %s", letters[choice], picked, letters[row.Correct], right)
 	}
-	if ex := strings.TrimSpace(row.Explanation); ex != "" {
-		toast += "\n💡 " + ex
-	}
+	toast := composeAlert(head, strings.TrimSpace(row.Explanation), "")
 
 	// live-tally: обновим сообщение (кнопки оставляем — отвечает каждый по разу).
 	total, correct, _ := q.repo.CountBallots(ctx, id)
@@ -165,30 +165,81 @@ func renderQuestion(prompt string, opts []string, total, correct int) string {
 }
 
 // revealToast строит приватный текст правильного ответа для нажавшего «Показать ответ».
+// Верный вариант — обязательная «шапка», объяснение «почему» приоритетнее декоративной
+// тэлли: под лимит алерта тэлли выкидывается первой (см. composeAlert).
 func revealToast(row *Row, counts map[int]int) string {
 	letters := "ABCD"
 	opts := row.Opts()
+	head := fmt.Sprintf("👁 Правильно: %c) %s", letters[row.Correct], strings.TrimSpace(opts[row.Correct]))
 	total := 0
 	for _, c := range counts {
 		total += c
 	}
-	s := fmt.Sprintf("👁 Правильно: %c) %s", letters[row.Correct], strings.TrimSpace(opts[row.Correct]))
+	var tally string
 	if total > 0 {
-		s += fmt.Sprintf(" (верно %d из %d)", counts[row.Correct], total)
+		tally = fmt.Sprintf(" (верно %d из %d)", counts[row.Correct], total)
 	}
-	if ex := strings.TrimSpace(row.Explanation); ex != "" {
-		s += "\n💡 " + ex
-	}
-	return s
+	return composeAlert(head, strings.TrimSpace(row.Explanation), tally)
 }
 
 // alertMaxUTF16 — лимит Telegram answerCallbackQuery: text 0–200, считаются UTF-16
 // code units (эмодзи = 2). Превышение → 400, алерт/тост молча не покажется.
 const alertMaxUTF16 = 200
 
-// capAlert ужимает текст алерта/тоста до лимита answerCallbackQuery, добавляя «…».
-// В revealToast и тосте ответа верный вариант идёт ВНАЧАЛЕ — он не обрезается, под
-// нож идёт только хвост длинного пояснения.
+// composeAlert собирает текст всплывающего ответа под лимит alertMaxUTF16 с приоритетом
+// объяснения «почему»: head (верный вариант) сохраняется целиком, затем в остаток бюджета
+// укладывается explanation (обрезается по границе слова с «…», лишь если сам не влезает),
+// и только если после этого остаётся место И пояснение не урезано — добавляется декор tail
+// (тэлли голосов). Так «почему» больше не режется ради счётчика — под нож первым идёт декор.
+func composeAlert(head, explanation, tail string) string {
+	out := head
+	truncated := false
+	if explanation != "" {
+		body, cut := fitRunes("\n💡 "+explanation, alertMaxUTF16-utf16Len(out))
+		out += body
+		truncated = cut
+	}
+	if tail != "" && !truncated && utf16Len(out)+utf16Len(tail) <= alertMaxUTF16 {
+		out += tail
+	}
+	return out
+}
+
+// fitRunes возвращает префикс s, влезающий в budget UTF-16, и флаг «обрезано». При обрезке
+// откатывается до последней границы слова (пробела) и дописывает «…», чтобы не рвать на
+// полуслове. budget≤1 или пустой префикс → ("", true).
+func fitRunes(s string, budget int) (string, bool) {
+	if utf16Len(s) <= budget {
+		return s, false
+	}
+	if budget <= 1 {
+		return "", true
+	}
+	limit := budget - 1 // место под «…»
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		cost := utf16Len(string(r))
+		if n+cost > limit {
+			break
+		}
+		b.WriteRune(r)
+		n += cost
+	}
+	out := b.String()
+	if i := strings.LastIndexByte(out, ' '); i > 0 {
+		out = out[:i]
+	}
+	out = strings.TrimRight(out, " \n")
+	if out == "" {
+		return "", true
+	}
+	return out + "…", true
+}
+
+// capAlert — финальный предохранитель под лимит answerCallbackQuery (на случай, когда одна
+// только head-шапка длиннее лимита). Основная укладка с приоритетом «почему» — в composeAlert;
+// здесь простое посимвольное усечение с «…».
 func capAlert(s string) string {
 	if utf16Len(s) <= alertMaxUTF16 {
 		return s

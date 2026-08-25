@@ -100,6 +100,62 @@ func TestRevealToastCappedFitsLimit(t *testing.T) {
 	}
 }
 
+// Приоритет «почему» над декором: при длинном пояснении тэлли выкидывается первой, а не
+// объяснение. Регрессия жалобы «нажимаю Показать ответ — обрезается и не видно почему».
+func TestComposeAlertPrioritisesExplanation(t *testing.T) {
+	t.Run("длинное пояснение вытесняет тэлли, не наоборот", func(t *testing.T) {
+		head := "👁 Правильно: C) public const MY = 'value'"
+		ex := strings.Repeat("почему именно так ", 30) // заведомо длиннее остатка бюджета
+		tally := " (верно 5 из 8)"
+		got := composeAlert(head, strings.TrimSpace(ex), tally)
+		if utf16Len(got) > alertMaxUTF16 {
+			t.Fatalf("len %d > %d: %q", utf16Len(got), alertMaxUTF16, got)
+		}
+		if !strings.HasPrefix(got, head) {
+			t.Errorf("шапка с верным ответом потеряна: %q", got)
+		}
+		if !strings.Contains(got, "💡") || !strings.HasSuffix(got, "…") {
+			t.Errorf("пояснение должно присутствовать и обрезаться «…»: %q", got)
+		}
+		if strings.Contains(got, "верно 5 из 8") {
+			t.Errorf("декор-тэлли должна уйти под нож раньше пояснения: %q", got)
+		}
+	})
+	t.Run("короткое пояснение — тэлли остаётся", func(t *testing.T) {
+		got := composeAlert("👁 Правильно: C) x", "коротко", " (верно 5 из 8)")
+		for _, want := range []string{"Правильно: C) x", "💡 коротко", "верно 5 из 8"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("ждали %q в %q", want, got)
+			}
+		}
+	})
+}
+
+// fitRunes не рвёт на полуслове: при обрезке откат до границы слова.
+func TestFitRunesWordBoundary(t *testing.T) {
+	s := "первое второе третье четвёртое пятое"
+	got, cut := fitRunes(s, 20)
+	if !cut {
+		t.Fatalf("ожидали обрезку для budget=20: %q", got)
+	}
+	if utf16Len(got) > 20 {
+		t.Errorf("len %d > 20: %q", utf16Len(got), got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("должно кончаться «…»: %q", got)
+	}
+	trimmed := strings.TrimSuffix(got, "…")
+	if strings.HasSuffix(trimmed, " ") {
+		t.Errorf("хвостовой пробел перед «…» не убран: %q", got)
+	}
+	// последнее слово не должно быть обрезком: то, что осталось, целиком из исходных слов.
+	for _, w := range strings.Fields(trimmed) {
+		if !strings.Contains(s, w) {
+			t.Errorf("слово %q обрезано на полуслове: %q", w, got)
+		}
+	}
+}
+
 // Регрессия гейта «Показать ответ»: подглядывание верного варианта до собственного ответа
 // запрещено. Тексты в таблице — продовые строки revealGate; их смена или перестановка
 // проверок (err должен доминировать над voted) ловится здесь. Полную проводку ветки "r"
