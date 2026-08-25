@@ -49,8 +49,8 @@ func freshCutoff(now time.Time, fakeEnabled bool) time.Time {
 	return cutoff
 }
 
-// digestTitle — заголовок поста дайджеста. Общий для обычного и пятничного выпусков:
-// пятничный не отличается от обычного даже шапкой.
+// digestTitle — заголовок поста дайджеста. Общий для обычного и пятничного выпусков;
+// пятничный добавляет под ним строку-подпись (fakeDisclaimer), заголовок тот же.
 const digestTitle = "📰 **PHP-дайджест**"
 
 // packagesSectionHeader — литерал заголовка секции пакетов: assembleDigest собирает его

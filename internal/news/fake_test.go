@@ -158,18 +158,15 @@ func TestSanitizeFakeBody(t *testing.T) {
 }
 
 func TestAssembleFakePost(t *testing.T) {
-	t.Run("шапка как у обычного дайджеста, без маркеров выдуманности", func(t *testing.T) {
+	t.Run("шапка = общий заголовок + подпись-предупреждение над телом", func(t *testing.T) {
 		got := assembleFakePost("[Статья](https://php.net/x) текст")
-		if !strings.HasPrefix(got, "📰 **PHP-дайджест**\n\n") {
-			t.Fatalf("заголовок не как у обычного дайджеста: %q", got)
+		if !strings.HasPrefix(got, digestTitle+"\n"+fakeDisclaimer+"\n\n") {
+			t.Fatalf("шапка не = заголовок + подпись: %q", got)
 		}
-		for _, bad := range []string{"🎰", "пятничн", "вымышлен", "всерьёз"} {
-			if strings.Contains(got, bad) {
-				t.Fatalf("маркер выдуманности %q в посте: %q", bad, got)
-			}
-		}
-		if !strings.Contains(got, "[Статья](https://php.net/x)") {
-			t.Fatalf("тело потеряно: %q", got)
+		disPos := strings.Index(got, fakeDisclaimer)
+		bodyPos := strings.Index(got, "[Статья](https://php.net/x)")
+		if disPos < 0 || bodyPos < 0 || disPos > bodyPos {
+			t.Fatalf("подпись должна идти над телом: %q", got)
 		}
 	})
 	t.Run("заголовок — общая константа с обычным дайджестом", func(t *testing.T) {
