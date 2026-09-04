@@ -50,10 +50,10 @@ jobs:
           docker logs php-bot 2>&1 | grep -E 'level=ERROR' | tail -5 | sed -E 's/[0-9]{5,}/<id>/g' || true
 
           echo '=== chat: messages per hour (6h back) ==='
-          docker exec php-bot-db sh -c "$PSGL \"SELECT extract(hour from created_at)::int AS h, count(*) FROM messages WHERE chat_id=-1001120236018 AND created_at > now() - make_interval(hours => 6) GROUP BY 1 ORDER BY 1;\""
+          docker exec php-bot-db sh -c "$PSGL \"SELECT extract(hour from ts)::int AS h, count(*) FROM messages WHERE chat_id=-1001120236018 AND created_at > now() - make_interval(hours => 6) GROUP BY 1 ORDER BY 1;\""
 
           echo '=== chat: minutes since last message ==='
-          docker exec php-bot-db sh -c "$PSGL \"SELECT coalesce(round(extract(epoch from (now() - max(created_at)))/60)::int, -1) FROM messages WHERE chat_id=-1001120236018;\""
+          docker exec php-bot-db sh -c "$PSGL \"SELECT coalesce(round(extract(epoch from (now() - max(ts)))/60)::int, -1) FROM messages WHERE chat_id=-1001120236018;\""
 
           echo '=== quizzes today / last kinds ==='
           docker exec php-bot-db sh -c "$PSGL \"SELECT count(*) FROM quizzes WHERE created_at >= current_date;\""
