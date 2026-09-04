@@ -301,3 +301,43 @@ func TestIsHardReason(t *testing.T) {
 		})
 	}
 }
+
+// TestSanctionPlan — чистая логика санкции: action по счётчику prior (prior+1>=warnMax
+// → restrict), silent приглушает повторы под действующим рестриктом, fullMute эскалирует
+// text-only рестрикт до полного мьюта. Центральный регрессионный кейс —
+// restrict_under_active_restrict: ночь, бот-спамер уже под рестриктом — поста в чат
+// больше нет (silent), но текст льётся → полный мут (fullMute). До фикса enforce на
+// каждое срабатывание постил новую санкцию (утро = простыня постов от самого бота).
+func TestSanctionPlan(t *testing.T) {
+	cases := []struct {
+		name           string
+		prior          int
+		warnMax        int
+		activeRestrict bool
+		wantAction     string
+		wantSilent     bool
+		wantFullMute   bool
+	}{
+		{"first_warn", 0, 3, false, "warn", false, false},
+		{"second_warn", 1, 3, false, "warn", false, false},
+		{"warn_max_reached_restrict_posts", 2, 3, false, "restrict", false, false},
+		{"restrict_under_active_restrict_silent_full_mute", 2, 3, true, "restrict", true, true},
+		{"warn_under_active_restrict_silent_no_full_mute", 0, 3, true, "warn", true, false},
+		{"way_over_max_still_restricts", 5, 3, false, "restrict", false, false},
+		{"way_over_max_under_restrict", 5, 3, true, "restrict", true, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			action, silent, fullMute := sanctionPlan(c.prior, c.warnMax, c.activeRestrict)
+			if action != c.wantAction {
+				t.Errorf("action = %q, want %q", action, c.wantAction)
+			}
+			if silent != c.wantSilent {
+				t.Errorf("silent = %v, want %v", silent, c.wantSilent)
+			}
+			if fullMute != c.wantFullMute {
+				t.Errorf("fullMute = %v, want %v", fullMute, c.wantFullMute)
+			}
+		})
+	}
+}

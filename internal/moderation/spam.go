@@ -67,6 +67,11 @@ type SpamFilter struct {
 	mu     sync.Mutex
 	recent map[int64]*userBucket
 
+	// enforceMu серийализует enforce целиком: чтение prior/активного рестрикта, удаление
+	// предыдущего warn-поста и привязка нового должны быть атомарны per-фильтр, иначе
+	// параллельные classifyInBackground-горутины по одному автору плодят дубликаты постов.
+	enforceMu sync.Mutex
+
 	stop chan struct{}
 	wg   sync.WaitGroup
 }
@@ -259,6 +264,9 @@ func (f *SpamFilter) classifyLLM(ctx context.Context, text string) (bool, string
 }
 
 func (f *SpamFilter) enforce(ctx context.Context, in SpamInput, reason string) {
+	f.enforceMu.Lock()
+	defer f.enforceMu.Unlock()
+
 	reason = truncateReason(sanitizeReason(reason))
 	now := time.Now()
 	prior, err := f.repo.CountSpamByUser(ctx, in.UserID, now.Add(-f.cfg.WarnPeriod))
@@ -266,11 +274,16 @@ func (f *SpamFilter) enforce(ctx context.Context, in SpamInput, reason string) {
 		slog.Warn("spam count by user", "err", err)
 		prior = 0
 	}
+	active, err := f.repo.ActiveSpamRestrict(ctx, in.ChatID, in.UserID, now)
+	if err != nil {
+		slog.Warn("spam active restrict", "err", err)
+		active = false
+	}
 
-	action := "warn"
+	action, silent, fullMute := sanctionPlan(prior, f.cfg.WarnMax, active)
+
 	var restrictUntil *time.Time
-	if prior+1 >= f.cfg.WarnMax {
-		action = "restrict"
+	if action == "restrict" {
 		until := now.Add(f.cfg.RestrictHours)
 		restrictUntil = &until
 	}
@@ -281,6 +294,26 @@ func (f *SpamFilter) enforce(ctx context.Context, in SpamInput, reason string) {
 		flagID = 0
 	}
 	deleteChatMessage(ctx, f.api, in.ChatID, in.MessageID)
+
+	// Автор уже под действующим рестриктом: санкционный пост в чат не дублируем (ночной
+	// флуд постов от одного бота), спам удаляем молча; text-only рестрикт текст-бота не
+	// останавливает — при эскалации ставим полный мьют до конца срока.
+	if silent {
+		if fullMute {
+			if err := muteUserUntil(ctx, f.api, in.ChatID, in.UserID, *restrictUntil); err != nil {
+				slog.Warn("spam full mute", "err", err)
+			}
+		}
+		slog.Info("spam silent enforce", "user", in.UserID, "action", action)
+		return
+	}
+
+	lastFlagID, lastMsgID, escalated, err := f.repo.LastSpamWarnMessage(ctx, in.ChatID, in.UserID, now.Add(-f.cfg.WarnPeriod))
+	if err != nil {
+		slog.Warn("spam last warn message", "err", err)
+	} else if lastFlagID != 0 && lastMsgID != 0 && !escalated {
+		deleteChatMessage(ctx, f.api, in.ChatID, lastMsgID)
+	}
 
 	params := &bot.SendMessageParams{ChatID: in.ChatID}
 	if flagID != 0 && f.cfg.EscalateEnabled {
@@ -309,6 +342,21 @@ func (f *SpamFilter) enforce(ctx context.Context, in SpamInput, reason string) {
 		return
 	}
 	slog.Info("spam warned", "user", in.UserID, "prior", prior)
+}
+
+// sanctionPlan — чистая логика санкции: action по счётчику prior (как раньше,
+// prior+1>=warnMax → restrict); silent приглушает повторные срабатывания автора под
+// действующим рестриктом (без поста в чат); fullMute эскалирует text-only рестрикт до
+// полного мьюта — текст-бота text-only не останавливает.
+func sanctionPlan(prior, warnMax int, activeRestrict bool) (action string, silent, fullMute bool) {
+	if prior+1 >= warnMax {
+		action = "restrict"
+	} else {
+		action = "warn"
+	}
+	silent = activeRestrict
+	fullMute = silent && action == "restrict"
+	return action, silent, fullMute
 }
 
 func (f *SpamFilter) Start(ctx context.Context) {

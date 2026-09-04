@@ -43,6 +43,19 @@ func restrictUserTextOnlyUntil(ctx context.Context, api *bot.Bot, chatID, userID
 	return err
 }
 
+// muteUserUntil — как muteUser (полный мьют), но с UntilDate: text-only рестрикт не
+// останавливает текст-бота, а срок на уровне TG — safety-net, как в restrictUserTextOnlyUntil.
+func muteUserUntil(ctx context.Context, api *bot.Bot, chatID, userID int64, until time.Time) error {
+	_, err := api.RestrictChatMember(ctx, &bot.RestrictChatMemberParams{
+		ChatID:                        chatID,
+		UserID:                        userID,
+		UntilDate:                     int(until.Unix()),
+		Permissions:                   &models.ChatPermissions{},
+		UseIndependentChatPermissions: true,
+	})
+	return err
+}
+
 func unmuteUserFull(ctx context.Context, api *bot.Bot, chatID, userID int64) error {
 	_, err := api.RestrictChatMember(ctx, &bot.RestrictChatMemberParams{
 		ChatID: chatID,

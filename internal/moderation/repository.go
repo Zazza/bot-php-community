@@ -340,6 +340,44 @@ func (r *Repository) GetSpamFlag(ctx context.Context, id int64) (*SpamFlag, erro
 	return &f, nil
 }
 
+// ActiveSpamRestrict — действует ли на автора рестрикт прямо сейчас (restrict_until в
+// будущем, не released): повторные срабатывания такому автору не постятся в чат.
+func (r *Repository) ActiveSpamRestrict(ctx context.Context, chatID, userID int64, now time.Time) (bool, error) {
+	var exists bool
+	if err := r.db.GetContext(ctx, &exists, `
+		SELECT EXISTS(SELECT 1 FROM spam_flags
+		 WHERE chat_id = $1 AND tg_user_id = $2 AND restrict_until IS NOT NULL
+		   AND restrict_until > $3 AND released_at IS NULL)`,
+		chatID, userID, now); err != nil {
+		return false, fmt.Errorf("active spam restrict: %w", err)
+	}
+	return exists, nil
+}
+
+// LastSpamWarnMessage — последний warn-пост автора с периода since: (flagID, messageID,
+// escalated). Снятые сообществом (false_positive) не возвращаются: их пост — публичная
+// запись оправдания, удалять её вслед за новой санкцией нельзя. Не найдено — нули/false.
+func (r *Repository) LastSpamWarnMessage(ctx context.Context, chatID, userID int64, since time.Time) (flagID, messageID int64, escalated bool, err error) {
+	var row struct {
+		ID            int64 `db:"id"`
+		WarnMessageID int64 `db:"warn_message_id"`
+		Escalated     bool  `db:"escalated"`
+	}
+	if err = r.db.GetContext(ctx, &row, `
+		SELECT id, warn_message_id, escalated_at IS NOT NULL AS escalated
+		FROM spam_flags
+		WHERE chat_id = $1 AND tg_user_id = $2 AND warn_message_id <> 0 AND detected_at >= $3
+		  AND NOT false_positive
+		ORDER BY id DESC LIMIT 1`,
+		chatID, userID, since); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, 0, false, nil
+		}
+		return 0, 0, false, fmt.Errorf("last spam warn message: %w", err)
+	}
+	return row.ID, row.WarnMessageID, row.Escalated, nil
+}
+
 // SetSpamWarnMessage привязывает id поста-предупреждения (для правки при эскалации/снятии).
 func (r *Repository) SetSpamWarnMessage(ctx context.Context, id, messageID int64) error {
 	if _, err := r.db.ExecContext(ctx,
