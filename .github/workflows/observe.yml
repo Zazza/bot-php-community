@@ -3,7 +3,7 @@ name: observe
 # Ручной read-only взгляд глубже healthcheck: счётчики событий в логах бота за период
 # и агрегаты из БД (сколько сообщений/викторин/спам-флагов). Репо публичный — НИКАКИХ
 # текстов сообщений, юзернеймов и user_id в вывод: только числа и метки.
-# Запуск: gh workflow run observe.yml --ref <ветка>
+# Запуск: gh workflow run observe.yml
 on:
   workflow_dispatch:
 
@@ -30,24 +30,36 @@ jobs:
               -o StrictHostKeyChecking=yes \
               -o ConnectTimeout=30 \
               "$DEPLOY_USER@$DEPLOY_HOST" \
-              "set -euo pipefail
-               cd /srv/php-bot
-               echo '=== container ==='
-               docker inspect php-bot --format 'status={{.State.Status}} restarts={{.RestartCount}} started={{.State.StartedAt}}'
-               echo '=== log levels since start ==='
-               docker logs php-bot 2>&1 | grep -cE 'level=ERROR' || true
-               docker logs php-bot 2>&1 | grep -cE 'level=WARN' || true
-               echo '=== event labels (top) ==='
-               docker logs php-bot 2>&1 | grep -oE 'msg=\"[a-z ]+\"' | sort | uniq -c | sort -rn | head -15 || true
-               echo '=== ERROR lines (scrubbed) ==='
-               docker logs php-bot 2>&1 | grep -E 'level=ERROR' | tail -5 | sed -E 's/[0-9]{5,}/<id>/g' || true
-               echo '=== messages per 2h (6h back) ==='
-               docker exec php-bot-db sh -c 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -tAc \"SELECT to_char(date_trunc(\x27hour\x27, created_at),\x27DD HH24h\x27) || \x27: \x27 || count(*) FROM messages WHERE chat_id=-1001120236018 AND created_at > now() - interval \x276 hours\x27 GROUP BY 1 ORDER BY 1;\"'
-               echo '=== quizzes today + last kinds ==='
-               docker exec php-bot-db sh -c 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -tAc \"SELECT count(*) FROM quizzes WHERE created_at >= date_trunc(\x27day\x27, now());\"'
-               docker exec php-bot-db sh -c 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -tAc \"SELECT kind FROM quizzes ORDER BY id DESC LIMIT 5;\"'
-               echo '=== spam_flags 24h by action ==='
-               docker exec php-bot-db sh -c 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -tAc \"SELECT action || \x27: \x27 || count(*) FROM spam_flags WHERE detected_at > now() - interval \x2724 hours\x27 GROUP BY action;\"'
-               echo '=== last message age (chat) ==='
-               docker exec php-bot-db sh -c 'psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -tAc \"SELECT round(extract(epoch from (now() - max(created_at)))/60) || \x27 min ago\x27 FROM messages WHERE chat_id=-1001120236018;\"'"
+              'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd /srv/php-bot
+          PSGL="psql -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" -tAc"
+
+          echo '=== container ==='
+          docker inspect php-bot --format 'status={{.State.Status}} restarts={{.RestartCount}} started={{.State.StartedAt}}'
+
+          echo '=== ERROR count ==='
+          docker logs php-bot 2>&1 | grep -cE 'level=ERROR' || true
+          echo '=== WARN count ==='
+          docker logs php-bot 2>&1 | grep -cE 'level=WARN' || true
+
+          echo '=== event labels (top) ==='
+          docker logs php-bot 2>&1 | grep -oE 'msg="[a-z ]+"' | sort | uniq -c | sort -rn | head -15 || true
+
+          echo '=== ERROR lines (scrubbed) ==='
+          docker logs php-bot 2>&1 | grep -E 'level=ERROR' | tail -5 | sed -E 's/[0-9]{5,}/<id>/g' || true
+
+          echo '=== chat: messages per hour (6h back) ==='
+          docker exec php-bot-db sh -c "$PSGL \"SELECT extract(hour from created_at)::int AS h, count(*) FROM messages WHERE chat_id=-1001120236018 AND created_at > now() - make_interval(hours => 6) GROUP BY 1 ORDER BY 1;\""
+
+          echo '=== chat: minutes since last message ==='
+          docker exec php-bot-db sh -c "$PSGL \"SELECT coalesce(round(extract(epoch from (now() - max(created_at)))/60)::int, -1) FROM messages WHERE chat_id=-1001120236018;\""
+
+          echo '=== quizzes today / last kinds ==='
+          docker exec php-bot-db sh -c "$PSGL \"SELECT count(*) FROM quizzes WHERE created_at >= current_date;\""
+          docker exec php-bot-db sh -c "$PSGL \"SELECT kind FROM quizzes ORDER BY id DESC LIMIT 5;\""
+
+          echo '=== spam_flags 24h by action ==='
+          docker exec php-bot-db sh -c "$PSGL \"SELECT action, count(*) FROM spam_flags WHERE detected_at > now() - make_interval(hours => 24) GROUP BY action;\""
+          REMOTE
           rm -f ~/.ssh/id_ed25519
