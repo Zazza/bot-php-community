@@ -21,9 +21,10 @@ type Quiz struct {
 	chatIDs []int64
 }
 
-// New создаёт Quiz.
-func New(api *bot.Bot, llm *llm.LLMClient, repo *Repository, chatIDs []int64) *Quiz {
-	return &Quiz{api: api, gen: &Generator{llm: llm, repo: repo}, repo: repo, chatIDs: chatIDs}
+// New создаёт Quiz. genLLM — творческий клиент генерации вопросов (temp=0.9),
+// verifyLLM — детерминированный клиент сверки верного ответа (temp=0).
+func New(api *bot.Bot, genLLM, verifyLLM *llm.LLMClient, repo *Repository, chatIDs []int64) *Quiz {
+	return &Quiz{api: api, gen: &Generator{gen: genLLM, verify: verifyLLM, repo: repo}, repo: repo, chatIDs: chatIDs}
 }
 
 // Post генерирует вопрос и шлёт его с inline-кнопками в чат.

@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"phpbot/internal/llm"
 	"phpbot/internal/prompts"
@@ -19,13 +22,23 @@ var errGenFailed = errors.New("не удалось собрать провере
 // maxAttempts — число попыток генерация+верификация, прежде чем сдаться.
 const maxAttempts = 3
 
-// dedupDays — окно дедупа по содержанию (не повторять тему/вопрос).
+// dedupDays — окно дедупа по содержанию строгого раунда (не повторять тему/вопрос).
 const dedupDays = 30
+
+// dedupFallbackDays — ослабленное окно второго раунда: свежие повторы всё ещё недопустимы.
+const dedupFallbackDays = 7
+
+// maxBannedQuestions — сколько текстов недавних вопросов показывается генератору.
+const maxBannedQuestions = 15
+
+// maxQuestionRunes — предел длины текста вопроса в бан-листе генератору.
+const maxQuestionRunes = 120
 
 // Generator собирает знаниевый вопрос через LLM и независимой сверкой защищает верный ответ.
 type Generator struct {
-	llm  *llm.LLMClient
-	repo *Repository
+	gen    *llm.LLMClient
+	verify *llm.LLMClient
+	repo   *Repository
 }
 
 // quizJSON — структура ответа генератора (строгий JSON из quiz.txt).
@@ -39,25 +52,31 @@ type quizJSON struct {
 }
 
 // Generate: LLM генерит MCQ по знаниям PHP → дедуп по содержанию → независимая self-verify
-// верного ответа. Повтор/не сошлось/LLM не уверен → следующая попытка. Сначала идём со строгим
-// дедупом; если за maxAttempts вариантов не осталось — ослабляем окно (без текст-дедупа, но
-// всё ещё с verify). Все попытки провалились → ошибка (cron пропустит день).
+// верного ответа. Повтор/не сошлось/LLM не уверен → следующая попытка. Два раунда: сначала
+// окно дедупа dedupDays, при неудаче — ослабленное dedupFallbackDays (текст-дедуп не
+// выключается). Генерация идёт творческим клиентом (temp=0.9), сверка — детерминированным
+// (temp=0). Оба раунда исчерпаны → ошибка (cron пропустит день: лучше молчание, чем повтор).
 func (g *Generator) Generate(ctx context.Context, chatID int64) (*Question, error) {
-	recent, _ := g.repo.RecentKeys(ctx, chatID, dedupDays)
-	seenText, seenCats := buildSeenKeys(recent)
-	avoid := categoryList(seenCats)
-	for _, enforceDedup := range []bool{true, false} {
+	recent, err := g.repo.RecentKeys(ctx, chatID, dedupDays)
+	if err != nil {
+		slog.Warn("quiz recent keys", "err", err)
+		recent = nil
+	}
+	now := time.Now()
+	for _, days := range []int{dedupDays, dedupFallbackDays} {
+		since := now.AddDate(0, 0, -days)
+		seenText, seenCats := buildSeenKeys(recent, since)
+		avoid := categoryList(seenCats)
+		banned := buildRecentQuestions(recentSince(recent, since), maxBannedQuestions)
 		for attempt := 0; attempt < maxAttempts; attempt++ {
-			raw, err := g.genOne(ctx, avoid)
+			raw, err := g.genOne(ctx, avoid, banned)
 			if err != nil || raw == nil || raw.Skip || !validQuiz(raw) {
 				continue
 			}
-			if enforceDedup {
-				if _, dup := seenText[normalizeKey(raw.Question)]; dup {
-					continue
-				}
+			if _, dup := seenText[normalizeKey(raw.Question)]; dup {
+				continue
 			}
-			ok, err := g.verify(ctx, raw)
+			ok, err := g.verifyAnswer(ctx, raw)
 			if err != nil || !ok {
 				continue
 			}
@@ -73,13 +92,17 @@ func (g *Generator) Generate(ctx context.Context, chatID int64) (*Question, erro
 	return nil, errGenFailed
 }
 
-// genOne просит LLM сгенерировать один MCQ, избегая недавних категорий.
-func (g *Generator) genOne(ctx context.Context, avoid []string) (*quizJSON, error) {
+// genOne просит LLM сгенерировать один MCQ, избегая недавних категорий и текстов вопросов.
+func (g *Generator) genOne(ctx context.Context, avoid, banned []string) (*quizJSON, error) {
 	user := "Сгенерируй один вопрос для викторины по знаниям PHP/веб."
 	if len(avoid) > 0 {
 		user += " Уже были темы — не повторяй их: " + strings.Join(avoid, ", ") + "."
 	}
-	resp, _, _, err := g.llm.Chat(ctx, []llm.Message{
+	if len(banned) > 0 {
+		user += "\n\nЭти вопросы уже задавались (не повторяй их и похожие по смыслу):\n— " +
+			strings.Join(banned, "\n— ")
+	}
+	resp, _, _, err := g.gen.Chat(ctx, []llm.Message{
 		{Role: "system", Content: prompts.Get(prompts.Quiz)},
 		{Role: "user", Content: user},
 	})
@@ -93,9 +116,10 @@ func (g *Generator) genOne(ctx context.Context, avoid []string) (*quizJSON, erro
 	return &q, nil
 }
 
-// verify — независимая сверка верного ответа. Вернёт true, только если второй вызов
-// однозначно указывает на тот же индекс; -1 (неоднозначно/некорректно) → отбраковка.
-func (g *Generator) verify(ctx context.Context, q *quizJSON) (bool, error) {
+// verifyAnswer — независимая сверка верного ответа (детерминированным клиентом temp=0).
+// Вернёт true, только если второй вызов однозначно указывает на тот же индекс;
+// -1 (неоднозначно/некорректно) → отбраковка.
+func (g *Generator) verifyAnswer(ctx context.Context, q *quizJSON) (bool, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Вопрос: %s\nВарианты:\n", strings.TrimSpace(q.Question))
 	letters := "ABCD"
@@ -105,7 +129,7 @@ func (g *Generator) verify(ctx context.Context, q *quizJSON) (bool, error) {
 		}
 		fmt.Fprintf(&b, "%c) %s\n", letters[i], strings.TrimSpace(o))
 	}
-	resp, _, _, err := g.llm.Chat(ctx, []llm.Message{
+	resp, _, _, err := g.verify.Chat(ctx, []llm.Message{
 		{Role: "system", Content: "Ты PHP-эксперт. Для вопроса викторины верни ОДНУ цифру — " +
 			"индекс верного варианта (0-3). Если верных несколько, ни одного или вопрос " +
 			"допускает трактовки — верни -1. Только цифра, без текста."},
@@ -173,18 +197,57 @@ func categoryList(m map[string]struct{}) []string {
 	return out
 }
 
-// buildSeenKeys собирает множества нормализованных текстов и категорий недавних вопросов
+// buildSeenKeys собирает множества нормализованных текстов и категорий вопросов окна since
 // для дедупа по содержанию.
-func buildSeenKeys(recent []RecentKey) (text, cats map[string]struct{}) {
+func buildSeenKeys(recent []RecentKey, since time.Time) (text, cats map[string]struct{}) {
 	text = make(map[string]struct{}, len(recent))
 	cats = make(map[string]struct{}, len(recent))
 	for _, k := range recent {
+		if k.CreatedAt.Before(since) {
+			continue
+		}
 		text[normalizeKey(k.Question)] = struct{}{}
 		if c := normalizeKey(k.Category); c != "" {
 			cats[c] = struct{}{}
 		}
 	}
 	return text, cats
+}
+
+// recentSince — вопросы из recent, заданные не раньше since (окно раунда дедупа).
+func recentSince(recent []RecentKey, since time.Time) []RecentKey {
+	out := make([]RecentKey, 0, len(recent))
+	for _, k := range recent {
+		if !k.CreatedAt.Before(since) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// buildRecentQuestions — тексты недавних вопросов для бан-листа генератору: recent уже
+// отсортирован DESC (свежие первыми), каждый обрезан до maxQuestionRunes рун.
+func buildRecentQuestions(recent []RecentKey, max int) []string {
+	out := make([]string, 0, max)
+	for _, k := range recent {
+		if len(out) >= max {
+			break
+		}
+		q := strings.TrimSpace(k.Question)
+		if q == "" {
+			continue
+		}
+		out = append(out, truncateRunes(q, maxQuestionRunes))
+	}
+	return out
+}
+
+// truncateRunes обрезает строку до max рун, помечая усечение «…».
+func truncateRunes(s string, max int) string {
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max]) + "…"
 }
 
 // parseVerify достаёт целочисленный вердикт verifier'а (первый токен-число; -1 = неоднозначно).

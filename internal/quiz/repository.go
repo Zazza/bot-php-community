@@ -90,18 +90,19 @@ func (r *Repository) Get(ctx context.Context, id int64) (*Row, error) {
 	return &row, nil
 }
 
-// RecentKey — категория и текст недавнего вопроса (для дедупа по содержанию).
+// RecentKey — категория, текст и дата недавнего вопроса (для дедупа по содержанию).
 type RecentKey struct {
-	Category string
-	Question string
+	Category  string
+	Question  string
+	CreatedAt time.Time `db:"created_at"`
 }
 
 // RecentKeys возвращает категории и тексты вопросов чата за последние days дней (для
-// дедупа: не повторять тему и не постить тот же вопрос).
+// дедупа: не повторять тему и не постить тот же вопрос), свежие первыми.
 func (r *Repository) RecentKeys(ctx context.Context, chatID int64, days int) ([]RecentKey, error) {
 	var rows []RecentKey
 	if err := r.db.SelectContext(ctx, &rows, `
-		SELECT kind AS category, question FROM quizzes
+		SELECT kind AS category, question, created_at FROM quizzes
 		WHERE chat_id = $1 AND created_at > now() - make_interval(days => $2)
 		ORDER BY id DESC
 	`, chatID, days); err != nil {
