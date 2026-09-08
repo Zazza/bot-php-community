@@ -1,0 +1,52 @@
+name: wallpapers
+
+# Доставка пула обоев на прод (/srv/php-bot/wallpapers) из release-asset.
+# Запуск вручную (workflow_dispatch). SSH с домашних машин на VPS фильтруется
+# (banner-timeout), GitHub-раннеры проходят — тот же канал и секреты, что deploy.yml.
+# Пул: релиз wallpapers-v1, asset wallpapers-v1.tar → tar -xf в /srv/php-bot.
+# Идемпотентен: повторный запуск перезаписывает файлы (tar overwrite), бот не трогает.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deliver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Deliver wallpapers to prod (/srv/php-bot/wallpapers)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          gh release download wallpapers-v1 --pattern 'wallpapers-v1.tar' --output wallpapers-v1.tar
+          ssh -i ~/.ssh/id_ed25519 \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=30 \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "set -euo pipefail
+               mkdir -p /srv/php-bot/wallpapers
+               tar -xf - -C /srv/php-bot
+               echo '=== pool check ==='
+               echo \"4k:   \$(find /srv/php-bot/wallpapers -name '*-4k.png' | wc -l)\"
+               echo \"phone: \$(find /srv/php-bot/wallpapers -name '*-phone.png' | wc -l)\"
+               echo \"prev:  \$(find /srv/php-bot/wallpapers -path '*/preview/*.jpg' | wc -l)\"" \
+              < wallpapers-v1.tar
+          rm -f ~/.ssh/id_ed25519 wallpapers-v1.tar
