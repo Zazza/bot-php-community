@@ -49,6 +49,11 @@ jobs:
               "set -euo pipefail
                read -r tok
                mkdir -p /srv/php-bot/wallpapers
+               # wallpapers/ создал dockerd от root (bind-mount при первом деплое
+               # до появления каталога) — phpbot писать не может. Чиним владельца
+               # одноразовым контейнером (phpbot в docker-группе, как в deploy).
+               docker run --rm -v /srv/php-bot/wallpapers:/w alpine:3 \
+                   chown -R \"\$(id -u):\$(id -g)\" /w
                curl -fsSL --retry 3 \
                    -H \"Authorization: Bearer \$tok\" \
                    -H 'Accept: application/octet-stream' \
