@@ -51,6 +51,7 @@ type Config struct {
 	NewsCron            string
 	NewsEnabled         bool
 	FakeNewsEnabled     bool
+	WallpapersDir       string
 }
 
 // Load читает env. Необходимые переменные — фаталят при отсутствии.
@@ -94,6 +95,7 @@ func Load() (*Config, error) {
 		NewsCron:            envOr("PHPBOT_NEWS_CRON", "0 20 * * *"),
 		NewsEnabled:         envBool("PHPBOT_NEWS_ENABLED", true),
 		FakeNewsEnabled:     envBool("PHPBOT_FAKE_NEWS_ENABLED", true),
+		WallpapersDir:       envOr("PHPBOT_WALLPAPERS_DIR", ""),
 	}
 	c.AdminIDs = envInt64List("PHPBOT_ADMIN_IDS")
 	c.ChatIDs = envInt64List("PHPBOT_CHAT_ID")

@@ -11,3 +11,4 @@ logs/
 Dockerfile
 docker-compose.yml
 .dockerignore
+wallpapers/

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -59,31 +60,36 @@ const packagesSectionHeader = "📦 **Новые пакеты**"
 
 // Digester собирает PHP-дайджест: фетч фидов → дедуп → LLM-куратория → пост.
 type Digester struct {
-	sources     []Source
-	llm         *llm.LLMClient
-	llmFake     *llm.LLMClient // умная с творческой температурой (temp≈0.9): пятничный фейк-выпуск
-	repo        *Repository
-	api         Poster
-	chatIDs     []int64
-	cron        *cron.Cron
-	fakeEnabled bool
+	mu            sync.Mutex // сериализует postWallpapers: cron-пятница и ручной /news fake могут совпасть
+	sources       []Source
+	llm           *llm.LLMClient
+	llmFake       *llm.LLMClient // умная с творческой температурой (temp≈0.9): пятничный фейк-выпуск
+	repo          *Repository
+	api           Poster
+	media         MediaPoster // обои (альбом+документы); nil → постинг обоев выключен
+	chatIDs       []int64
+	cron          *cron.Cron
+	fakeEnabled   bool
+	wallpapersDir string
 }
 
 // NewDigester создаёт Digester. sources=nil → DefaultSources. llmFake — умная модель
 // с творческой температурой для пятничного фейк-выпуска; fakeEnabled — рубрика вместо
-// обычного дайджеста по пятницам.
-func NewDigester(llm, llmFake *llm.LLMClient, repo *Repository, api Poster, chatIDs []int64, sources []Source, fakeEnabled bool) *Digester {
+// обычного дайджеста по пятницам; media/wallpapersDir — «Пятничные обои» после
+// фейк-выпуска (пустой dir → выключены).
+func NewDigester(llm, llmFake *llm.LLMClient, repo *Repository, api Poster, media MediaPoster, chatIDs []int64, sources []Source, fakeEnabled bool, wallpapersDir string) *Digester {
 	if len(sources) == 0 {
 		sources = DefaultSources()
 	}
-	return &Digester{sources: sources, llm: llm, llmFake: llmFake, repo: repo, api: api, chatIDs: chatIDs, fakeEnabled: fakeEnabled}
+	return &Digester{sources: sources, llm: llm, llmFake: llmFake, repo: repo, api: api, media: media, chatIDs: chatIDs, fakeEnabled: fakeEnabled, wallpapersDir: wallpapersDir}
 }
 
 // Start регистрирует пост дайджеста (по умолчанию ежедневно 19:00) и запускает cron.
 func (d *Digester) Start(ctx context.Context, spec string) error {
 	c := cron.New()
 	_, err := c.AddFunc(spec, func() {
-		// 6 минут: пятница worst-case = фейк-вызов (90s) + fallback на обычный пост
+		// 6 минут: дайджест + обои укладываются в бюджет. Пятница worst-case =
+		// фейк-вызов (90s) + обои (свой ctx 4 мин) либо fallback на обычный пост
 		// (фетч фидов + два LLM-вызова секций по 90s) — 240s не покрывали.
 		bg, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 		defer cancel()
@@ -112,6 +118,9 @@ func (d *Digester) Start(ctx context.Context, spec string) error {
 	c.Start()
 	d.cron = c
 	slog.Info("news scheduler started", "cron", spec, "sources", len(d.sources))
+	if d.wallpapersDir != "" {
+		slog.Info("friday wallpapers enabled", "dir", d.wallpapersDir)
+	}
 	return nil
 }
 

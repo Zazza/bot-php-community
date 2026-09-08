@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 
@@ -70,6 +71,52 @@ func NewPoster(api *bot.Bot) *PosterImpl { return &PosterImpl{api: api} }
 // PostMessage отправляет текст в чат.
 func (p *PosterImpl) PostMessage(ctx context.Context, chatID int64, text string) error {
 	return SendMessage(ctx, p.api, chatID, text)
+}
+
+// PostPhotos отправляет альбом (sendMediaGroup): по одному фото на путь, caption —
+// только на первом (TG показывает подпись альбома один раз).
+func (p *PosterImpl) PostPhotos(ctx context.Context, chatID int64, paths []string, caption string) error {
+	files := make([]*os.File, 0, len(paths))
+	defer func() {
+		for _, f := range files {
+			f.Close()
+		}
+	}()
+	media := make([]models.InputMedia, 0, len(paths))
+	for i, path := range paths {
+		f, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("open photo %s: %w", path, err)
+		}
+		files = append(files, f)
+		photo := &models.InputMediaPhoto{Media: "attach://p" + strconv.Itoa(i), MediaAttachment: f}
+		if i == 0 {
+			photo.Caption = caption
+		}
+		media = append(media, photo)
+	}
+	if _, err := p.api.SendMediaGroup(ctx, &bot.SendMediaGroupParams{ChatID: chatID, Media: media}); err != nil {
+		return fmt.Errorf("send media group: %w", err)
+	}
+	return nil
+}
+
+// PostDocument отправляет файл документом (без пересжатия TG). Detection выключен:
+// содержимое — PNG, но как документ оно не должно переквалифицироваться в фото.
+func (p *PosterImpl) PostDocument(ctx context.Context, chatID int64, path, filename string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open document %s: %w", path, err)
+	}
+	defer f.Close()
+	if _, err := p.api.SendDocument(ctx, &bot.SendDocumentParams{
+		ChatID:                      chatID,
+		Document:                    &models.InputFileUpload{Filename: filename, Data: f},
+		DisableContentTypeDetection: true,
+	}); err != nil {
+		return fmt.Errorf("send document: %w", err)
+	}
+	return nil
 }
 
 // extractCommand парсит "/cmd[@bot] args..." → (cmd_lower, args).

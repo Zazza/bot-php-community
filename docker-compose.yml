@@ -75,11 +75,14 @@ services:
       PHPBOT_QUIET_THRESHOLD: ${PHPBOT_QUIET_THRESHOLD:-20}
       PHPBOT_TOPIC_CRON: ${PHPBOT_TOPIC_CRON:-0 12,20 * * *}
       PHPBOT_NEWCOMER_TIMEOUT: ${PHPBOT_NEWCOMER_TIMEOUT:-5m}
+      # Пятничные обои: пул работ из ./wallpapers (тема/{slug}-4k.png + -phone.png + preview/).
+      PHPBOT_WALLPAPERS_DIR: ${PHPBOT_WALLPAPERS_DIR:-/app/wallpapers}
       # Логи
       TZ: ${TZ:-Europe/Moscow}
       PHPBOT_LOG_PATH: /app/logs/bot.log
     volumes:
       - ./logs:/app/logs
+      - ./wallpapers:/app/wallpapers:ro
     networks: [phpbot-net]
 
 volumes:

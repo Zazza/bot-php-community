@@ -300,6 +300,13 @@ func (d *Digester) PostFake(ctx context.Context, chatID int64) error {
 	if err := d.repo.SaveFake(ctxSave, chatID, fakeRubricKey(plan), capFakeBody(body, fakeBodyBudget())); err != nil {
 		slog.Warn("fake news memory write", "err", err)
 	}
+	// Обои — после успешного выпуска и памяти: это приложение к пятнице, не замена.
+	// postWallpapers со своим ctx — почти истёкший ctx ручного /news fake её не убьёт.
+	// Осознанно: fallback-пятница (фейк упал → обычный Post) остаётся без обоев, а
+	// ручной /news fake ест слоты ротации обоев — тот же дедуп-цикл, что и у крона.
+	if d.wallpapersDir != "" && d.media != nil {
+		d.postWallpapers(chatID)
+	}
 	return nil
 }
 

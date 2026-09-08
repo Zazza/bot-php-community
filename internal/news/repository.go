@@ -80,6 +80,49 @@ func (r *Repository) ListFake(ctx context.Context, chatID int64, limit int) ([]F
 	return rows, nil
 }
 
+// ShownWallpapers возвращает множество ключей уже показанных обоев чата.
+func (r *Repository) ShownWallpapers(ctx context.Context, chatID int64) (map[string]struct{}, error) {
+	var keys []string
+	if err := r.db.SelectContext(ctx, &keys,
+		`SELECT wallpaper FROM news_wallpapers WHERE chat_id = $1`, chatID); err != nil {
+		return nil, fmt.Errorf("wallpapers shown: %w", err)
+	}
+	out := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		out[k] = struct{}{}
+	}
+	return out, nil
+}
+
+// MarkWallpapersShown отмечает обои как показанные (одним batch-запросом, идемпотентно).
+func (r *Repository) MarkWallpapersShown(ctx context.Context, chatID int64, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(keys))
+	args := make([]interface{}, 0, len(keys)+1)
+	args = append(args, chatID)
+	for i, k := range keys {
+		values = append(values, fmt.Sprintf("($1, $%d)", i+2))
+		args = append(args, k)
+	}
+	q := `INSERT INTO news_wallpapers (chat_id, wallpaper) VALUES ` +
+		strings.Join(values, ", ") + ` ON CONFLICT (chat_id, wallpaper) DO NOTHING`
+	if _, err := r.db.ExecContext(ctx, q, args...); err != nil {
+		return fmt.Errorf("mark wallpapers shown: %w", err)
+	}
+	return nil
+}
+
+// ResetWallpapers очищает историю показа обоев чата — цикл пула начинается заново.
+func (r *Repository) ResetWallpapers(ctx context.Context, chatID int64) error {
+	if _, err := r.db.ExecContext(ctx,
+		`DELETE FROM news_wallpapers WHERE chat_id = $1`, chatID); err != nil {
+		return fmt.Errorf("reset wallpapers: %w", err)
+	}
+	return nil
+}
+
 // hashURL — стабильный хэш нормализованного URL для дедупа: нижний регистр хоста,
 // без фрагмента и utm_* параметров, без висячего слэша в пути.
 func hashURL(link string) string {
