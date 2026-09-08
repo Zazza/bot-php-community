@@ -41,7 +41,7 @@ jobs:
           # Одноразовый токен джобы (repo-scoped, живёт до конца job) уходит на
           # VPS по stdin — не светится в ps/логах.
           ASSET_API=$(gh api "repos/$GH_REPO/releases/tags/wallpapers-v1" --jq '.assets[0].url')
-          printf '%s' "$GH_TOKEN" | ssh -i ~/.ssh/id_ed25519 \
+          printf '%s\n' "$GH_TOKEN" | ssh -i ~/.ssh/id_ed25519 \
               -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes \
               -o ConnectTimeout=30 \
