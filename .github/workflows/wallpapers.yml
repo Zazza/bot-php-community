@@ -3,10 +3,11 @@ name: wallpapers
 # Доставка пула обоев на прод (/srv/php-bot/wallpapers) из release-asset.
 # Запуск вручную (workflow_dispatch). SSH с домашних машин на VPS фильтруется
 # (banner-timeout), GitHub-раннеры проходят — тот же канал и секреты, что deploy.yml.
-# Пул: релиз wallpapers-v2, asset wallpapers-v2.tar → tar -xf в /srv/php-bot.
+# Пул: релиз wallpapers-v3, asset wallpapers-v3.tar → tar -xf в /srv/php-bot.
 # v2 (2026-09-10): пул 42→30 работ — убраны нетематичные city/macro/mountains/retro;
-# остались desk/minimal/space/terminal. Идемпотентен: повторный запуск перезаписывает
-# файлы (tar overwrite) и вычищает исключённые темы, бот не трогается.
+# v3 (2026-09-10): убран space → осталось desk/minimal/terminal (28 работ).
+# Идемпотентен: повторный запуск перезаписывает файлы (tar overwrite) и вычищает
+# исключённые темы, бот не трогается.
 
 on:
   workflow_dispatch:
@@ -42,7 +43,7 @@ jobs:
           # (прокачка 205МБ через раннер не уложилась в таймаут джобы).
           # Одноразовый токен джобы (repo-scoped, живёт до конца job) уходит на
           # VPS по stdin — не светится в ps/логах.
-          ASSET_API=$(gh api "repos/$GH_REPO/releases/tags/wallpapers-v2" --jq '.assets[0].url')
+          ASSET_API=$(gh api "repos/$GH_REPO/releases/tags/wallpapers-v3" --jq '.assets[0].url')
           printf '%s\n' "$GH_TOKEN" | ssh -i ~/.ssh/id_ed25519 \
               -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes \
@@ -51,12 +52,13 @@ jobs:
               "set -euo pipefail
                read -r tok
                # tar -xf не удаляет темы, исключённые из нового ассета — вычищаем
-               # убранные в v2 (каталог обоев не пересоздаём: inode держит bind-mount
-               # контейнера, замена = пустой /app/wallpapers до рестарта).
+               # убранные в v2/v3 (каталог обоев не пересоздаём: inode держит
+               # bind-mount контейнера, замена = пустой /app/wallpapers до рестарта).
                rm -rf /srv/php-bot/wallpapers/city \
                       /srv/php-bot/wallpapers/macro \
                       /srv/php-bot/wallpapers/mountains \
-                      /srv/php-bot/wallpapers/retro
+                      /srv/php-bot/wallpapers/retro \
+                      /srv/php-bot/wallpapers/space
                mkdir -p /srv/php-bot/wallpapers
                # wallpapers/ создал dockerd от root (bind-mount при первом деплое
                # до появления каталога) — phpbot писать не может. Чиним владельца
@@ -66,9 +68,9 @@ jobs:
                curl -fsSL --retry 3 \
                    -H \"Authorization: Bearer \$tok\" \
                    -H 'Accept: application/octet-stream' \
-                   '$ASSET_API' -o /tmp/wallpapers-v2.tar
-               tar -xf /tmp/wallpapers-v2.tar -C /srv/php-bot
-               rm -f /tmp/wallpapers-v2.tar
+                   '$ASSET_API' -o /tmp/wallpapers-v3.tar
+               tar -xf /tmp/wallpapers-v3.tar -C /srv/php-bot
+               rm -f /tmp/wallpapers-v3.tar
                echo '=== pool check ==='
                echo \"4k:   \$(find /srv/php-bot/wallpapers -name '*-4k.png' | wc -l)\"
                echo \"phone: \$(find /srv/php-bot/wallpapers -name '*-phone.png' | wc -l)\"
