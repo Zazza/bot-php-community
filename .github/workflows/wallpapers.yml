@@ -3,9 +3,11 @@ name: wallpapers
 # Доставка пула обоев на прод (/srv/php-bot/wallpapers) из release-asset.
 # Запуск вручную (workflow_dispatch). SSH с домашних машин на VPS фильтруется
 # (banner-timeout), GitHub-раннеры проходят — тот же канал и секреты, что deploy.yml.
-# Пул: релиз wallpapers-v3, asset wallpapers-v3.tar → tar -xf в /srv/php-bot.
+# Пул: релиз wallpapers-v4, asset wallpapers-v4.tar → tar -xf в /srv/php-bot.
 # v2 (2026-09-10): пул 42→30 работ — убраны нетематичные city/macro/mountains/retro;
 # v3 (2026-09-10): убран space → осталось desk/minimal/terminal (28 работ).
+# v4 (2026-09-10): desk/dual-monitors, desk/minimal, minimal/teal-purple дополнены
+# PHP-кодом (enum Suit + match) на экранах/в абстракции — in-place, имена те же.
 # Идемпотентен: повторный запуск перезаписывает файлы (tar overwrite) и вычищает
 # исключённые темы, бот не трогается.
 
@@ -43,7 +45,7 @@ jobs:
           # (прокачка 205МБ через раннер не уложилась в таймаут джобы).
           # Одноразовый токен джобы (repo-scoped, живёт до конца job) уходит на
           # VPS по stdin — не светится в ps/логах.
-          ASSET_API=$(gh api "repos/$GH_REPO/releases/tags/wallpapers-v3" --jq '.assets[0].url')
+          ASSET_API=$(gh api "repos/$GH_REPO/releases/tags/wallpapers-v4" --jq '.assets[0].url')
           printf '%s\n' "$GH_TOKEN" | ssh -i ~/.ssh/id_ed25519 \
               -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes \
@@ -68,9 +70,9 @@ jobs:
                curl -fsSL --retry 3 \
                    -H \"Authorization: Bearer \$tok\" \
                    -H 'Accept: application/octet-stream' \
-                   '$ASSET_API' -o /tmp/wallpapers-v3.tar
-               tar -xf /tmp/wallpapers-v3.tar -C /srv/php-bot
-               rm -f /tmp/wallpapers-v3.tar
+                   '$ASSET_API' -o /tmp/wallpapers-v4.tar
+               tar -xf /tmp/wallpapers-v4.tar -C /srv/php-bot
+               rm -f /tmp/wallpapers-v4.tar
                echo '=== pool check ==='
                echo \"4k:   \$(find /srv/php-bot/wallpapers -name '*-4k.png' | wc -l)\"
                echo \"phone: \$(find /srv/php-bot/wallpapers -name '*-phone.png' | wc -l)\"
