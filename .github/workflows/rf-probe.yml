@@ -1,0 +1,50 @@
+name: rf-probe
+
+# Read-only диагностика сетевой доступности с прода: батарея HTTPS-проб к РФ-хостам
+# (Yandex/Selectel/агрегаторы LLM) + контрольный зарубежный + traceroute до polza.
+# Ничего не меняет. Запуск: gh workflow run rf-probe.yml
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Prod -> RF battery (read-only)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          ssh -i ~/.ssh/id_ed25519 \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=30 \
+              "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          probe() {
+            label="$1"; url="$2"
+            out=$(curl -sS -o /dev/null -m 10 -w 'http=%{http_code} tcp=%{time_connect}s tls=%{time_appconnect}s' "$url" 2>&1) \
+              || out="$out (FAIL)"
+            printf '%-28s %s\n' "$label" "$out"
+          }
+          probe telegram-api      https://api.telegram.org/
+          probe yandex-ru         https://yandex.ru/
+          probe yandex-cloud-site https://yandex.cloud/
+          probe selectel-ru       https://selectel.ru/
+          probe vsellm-api        https://api.vsellm.ru/v1/models
+          probe polza-api         https://polza.ai/api/v1/models
+          probe proxyapi-ru       https://api.proxyapi.ru/v1/models
+          probe vsegpt-ru         https://vsegpt.ru/
+          probe habr-ru           https://habr.com/
+          echo '=== traceroute -> polza.ai (158.160.170.34) ==='
+          timeout 25 traceroute -n -m 15 -w 2 158.160.170.34 2>&1 || true
+          REMOTE
+          rm -f ~/.ssh/id_ed25519
