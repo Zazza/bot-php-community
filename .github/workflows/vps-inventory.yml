@@ -1,0 +1,47 @@
+name: vps-inventory
+
+# Read-only инвентаризация Finland VPS: контейнеры, сервисы, порты, тоннели, ресурсы.
+# Ничего не меняет. Запуск: gh workflow run vps-inventory.yml
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: VPS inventory (read-only)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          ssh -i ~/.ssh/id_ed25519 \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=30 \
+              "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          echo '=== uptime / load ==='
+          uptime
+          echo '=== cpu / mem / disk ==='
+          nproc; free -h | head -2; df -h / | tail -1
+          echo '=== docker ps -a ==='
+          docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+          echo '=== running services (non-template) ==='
+          systemctl list-units --type=service --state=running --no-pager --no-legend | grep -vE 'systemd|dbus|ssh\.service|cron|rsyslog|getty|polkit|networkd|resolved|logind|containerd|docker\.service' | head -25 || true
+          echo '=== wireguard ==='
+          sudo -n wg show 2>/dev/null || wg show 2>/dev/null || echo '(wg недоступен без root)'
+          echo '=== listening ports ==='
+          ss -tulpn 2>/dev/null | awk 'NR==1 || $5 !~ /^127\./' | head -30
+          echo '=== network ifaces ==='
+          ip -brief addr | grep -v 'docker\|br-\|veth'
+          REMOTE
+          rm -f ~/.ssh/id_ed25519
