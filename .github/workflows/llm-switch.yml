@@ -1,55 +1,33 @@
 name: llm-switch
 
-# Разовое переключение LLM-провайдера на polza.ai (инцидент: анти-DDoS vsellm
-# режет TLS с IP прода). Сначала preflight С ПРОДА — реальный chat-completion
-# в polza; если путь Финляндия->polza не работает, .env НЕ трогается вовсе.
-# Затем .env (бэкап) + recreate контейнера bot. Запуск: gh workflow run llm-switch.yml
+# Переключение PHPBOT_LLM_URL бота на проде (инцидент 18.09.2026: прод не достёгивается
+# до РФ-хостов напрямую; LLM ходит через wg-туннель Timeweb↔VPS и прокладку llm-proxy
+# на Timeweb, 10.8.0.2:8443 → api.vsellm.ru, /srv/llm-proxy/).
+# Preflight: реальный chat-completion с ключом ИЗ .env прода — если новый URL не отвечает,
+# .env не трогается. Откат: llm_url=https://api.vsellm.ru/v1 (прямой, работает только
+# если РФ перестанет резать VPS) — или восстановить .env.bak-* на проде.
+# Запуск: gh workflow run llm-switch.yml -f llm_url=http://10.8.0.2:8443/v1
 
 on:
   workflow_dispatch:
+    inputs:
+      llm_url:
+        description: 'Новый PHPBOT_LLM_URL'
+        required: true
+        default: 'http://10.8.0.2:8443/v1'
 
 jobs:
   switch:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Preflight (prod -> polza chat completion)
+      - name: Preflight and apply
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
-          POLZA_API_KEY: ${{ secrets.POLZA_API_KEY }}
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          printf '%s\n' "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
-          SSH="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=30 $DEPLOY_USER@$DEPLOY_HOST"
-          printf '%s' "$POLZA_API_KEY" | $SSH 'cat > /tmp/polza_key && chmod 600 /tmp/polza_key'
-          $SSH 'bash -s' <<'REMOTE'
-          set -euo pipefail
-          code=$(curl -sS -m 30 -o /tmp/pf.json -w '%{http_code}' \
-            https://polza.ai/api/v1/chat/completions \
-            -H "Authorization: Bearer $(cat /tmp/polza_key)" \
-            -H 'Content-Type: application/json' \
-            -d '{"model":"openai/gpt-4o-mini","max_tokens":5,"messages":[{"role":"user","content":"ping"}]}')
-          if [ "$code" != 200 ]; then
-            echo "PREFLIGHT FAIL: http=$code — путь прод->polza не работает, .env НЕ тронут"
-            head -c 300 /tmp/pf.json 2>/dev/null || true
-            rm -f /tmp/polza_key /tmp/pf.json
-            exit 1
-          fi
-          echo "PREFLIGHT OK: прод->polza chat completion 200"
-          rm -f /tmp/pf.json
-          REMOTE
-      - name: Apply .env and recreate bot
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          LLM_URL: ${{ github.event.inputs.llm_url }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -60,28 +38,30 @@ jobs:
               -o IdentitiesOnly=yes \
               -o StrictHostKeyChecking=yes \
               -o ConnectTimeout=30 \
-              "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+              "$DEPLOY_USER@$DEPLOY_HOST" "bash -s" <<REMOTE
           set -euo pipefail
           cd /srv/php-bot
-          cp .env ".env.bak-vsellm-$(date +%Y%m%d%H%M%S)"
-          setenv() {
-            if grep -qE "^$1=" .env; then
-              sed -i "s|^$1=.*|$1=$2|" .env
-            else
-              printf '%s=%s\n' "$1" "$2" >> .env
-            fi
-          }
-          setenv PHPBOT_LLM_URL https://polza.ai/api/v1
-          setenv PHPBOT_LLM_API_KEY "$(cat /tmp/polza_key)"
-          setenv PHPBOT_LLM_MODEL google/gemini-2.5-flash
-          setenv PHPBOT_LLM_MODEL_CHEAP openai/gpt-4o-mini
-          setenv PHPBOT_EMBED_MODEL openai/text-embedding-3-small
-          rm -f /tmp/polza_key
+          KEY=\$(grep "^PHPBOT_LLM_API_KEY=" .env | cut -d= -f2-)
+          code=\$(curl -sS -m 90 -o /tmp/pf.json -w '%{http_code}' "\$LLM_URL/chat/completions" \
+            -H "Authorization: Bearer \$KEY" -H 'Content-Type: application/json' \
+            -d '{"model":"openai/gpt-4o-mini","max_tokens":5,"messages":[{"role":"user","content":"ping"}]}')
+          if [ "\$code" != 200 ]; then
+            echo "PREFLIGHT FAIL: http=\$code — \$LLM_URL не работает, .env НЕ тронут"
+            head -c 300 /tmp/pf.json 2>/dev/null || true
+            rm -f /tmp/pf.json
+            exit 1
+          fi
+          echo "PREFLIGHT OK: \$LLM_URL chat completion 200"
+          rm -f /tmp/pf.json
+          cp .env ".env.bak-\$(date +%Y%m%d%H%M%S)"
+          if grep -q '^PHPBOT_LLM_URL=' .env; then
+            sed -i "s|^PHPBOT_LLM_URL=.*|PHPBOT_LLM_URL=\$LLM_URL|" .env
+          else
+            printf 'PHPBOT_LLM_URL=%s\n' "\$LLM_URL" >> .env
+          fi
           docker compose up -d bot
           sleep 10
-          echo '=== compose ps (bot) ==='
-          docker compose ps bot
-          echo '=== bot logs (tail 25) ==='
-          docker compose logs --tail 25 bot
+          echo '=== bot logs (tail 12) ==='
+          docker compose logs --tail 12 bot
           REMOTE
           rm -f ~/.ssh/id_ed25519
