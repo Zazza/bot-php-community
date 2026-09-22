@@ -1,0 +1,71 @@
+name: llm-switch-openai
+
+# Переключение LLM бота на прямой api.openai.com (инцидент 22.09: wg-туннель
+# Timeweb↔VPS мёртв, vsellm-прокладка 10.8.0.2:8443 недоступна). Фин — не РФ,
+# OpenAI оттуда прямой. Ключ — из секретов репо (OPENAI_API_KEY), в .env прода.
+# Модели: vsellm-имена (google/*, openai/*) на прямом OpenAI не существуют →
+# gpt-4o (умная, была google/gemini-2.5-flash) и gpt-4o-mini (дешёвая).
+# Preflight ДО записи .env: реальный chat-completions с новым ключом; при сбое
+# .env не трогается. Откат: .env.bak-* в /srv/php-bot.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  switch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Preflight and apply (OpenAI direct)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          OAI_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          ssh -i ~/.ssh/id_ed25519 \
+              -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=30 \
+              "$DEPLOY_USER@$DEPLOY_HOST" "OAI_KEY=$(printf '%q' "$OAI_KEY") bash -s" <<REMOTE
+          set -euo pipefail
+          cd /srv/php-bot
+          code=\$(curl -sS -m 30 -o /tmp/pf.json -w '%{http_code}' https://api.openai.com/v1/chat/completions \
+            -H "Authorization: Bearer \$OAI_KEY" -H 'Content-Type: application/json' \
+            -d '{"model":"gpt-4o-mini","max_tokens":5,"messages":[{"role":"user","content":"ping"}]}')
+          if [ "\$code" != 200 ]; then
+            echo "PREFLIGHT FAIL: http=\$code — api.openai.com с фина не ответил, .env НЕ тронут"
+            head -c 300 /tmp/pf.json 2>/dev/null || true
+            rm -f /tmp/pf.json
+            exit 1
+          fi
+          echo "PREFLIGHT OK: api.openai.com chat completion 200"
+          rm -f /tmp/pf.json
+          cp .env ".env.bak-\$(date +%Y%m%d%H%M%S)"
+          setkv() {
+            if grep -q "^\$1=" .env; then sed -i "s|^\$1=.*|\$1=\$2|" .env
+            else printf '%s=%s\n' "\$1" "\$2" >> .env; fi
+          }
+          setkv PHPBOT_LLM_URL https://api.openai.com/v1
+          setkv PHPBOT_LLM_API_KEY "\$OAI_KEY"
+          setkv PHPBOT_LLM_MODEL gpt-4o
+          setkv PHPBOT_LLM_MODEL_CHEAP gpt-4o-mini
+          setkv PHPBOT_EMBED_MODEL text-embedding-3-small
+          echo '=== .env применён (значения скрыты) ==='
+          grep -E '^PHPBOT_LLM_(URL|MODEL|MODEL_CHEAP|EMBED_MODEL)=' .env
+          docker compose up -d
+          sleep 10
+          echo '=== bot logs (tail 20) ==='
+          docker compose logs --tail 20 bot
+          REMOTE
+          rm -f ~/.ssh/id_ed25519
