@@ -1,0 +1,37 @@
+name: fin-inventory
+# Разовый read-only осмотр фина перед удалением сервера: что перенести.
+on:
+  workflow_dispatch:
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Deep inventory (read-only)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=30 "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          echo '=== /srv ==='; ls -la /srv/ 2>/dev/null
+          for d in /srv/*/; do echo "--- $d"; du -sh "$d" 2>/dev/null; ls "$d" | head -8; done
+          echo '=== docker volumes ==='; docker volume ls -q | head -10
+          docker system df 2>/dev/null | head -5
+          echo '=== cron ==='; crontab -l 2>/dev/null | head -10; sudo -n crontab -l 2>/dev/null | head -10
+          echo '=== /root и /home ==='; ls /root 2>/dev/null | head; ls /home 2>/dev/null
+          echo '=== systemd custom ==='; ls /etc/systemd/system/ | grep -vE 'wants|target' | head -10
+          echo '=== tinyproxy conf ==='; grep -vE '^\s*#|^$' /etc/tinyproxy/tinyproxy.conf 2>/dev/null | head -15
+          echo '=== wg ==='; sudo -n cat /etc/wireguard/*.conf 2>/dev/null | grep -vE 'PrivateKey|PresharedKey' | head -20
+          echo '=== wallpapers ==='; ls -la /srv/php-bot/wallpapers/ 2>/dev/null | head -5; du -sh /srv/php-bot/wallpapers 2>/dev/null
+          echo '=== env size ==='; wc -l /srv/php-bot/.env 2>/dev/null
+          REMOTE
+          rm -f ~/.ssh/id_ed25519
