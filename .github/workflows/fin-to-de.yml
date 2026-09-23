@@ -1,0 +1,46 @@
+name: fin-to-de
+# Разовый перенос данных php-bot с фина (89.125.115.169, РФ-путь мёртв) на DE VPS
+# (78.17.56.245): .env + wallpapers + pg_dump. Данные идут транзитом через раннер
+# во временные файлы, в лог не попадают. Бота НЕ стартует — старт после остановки фина.
+on:
+  workflow_dispatch:
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Pull from fin, push to DE
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+          DE_KEY: ${{ secrets.DE_ROOT_KEY }}
+          DE_KNOWN: ${{ secrets.DE_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_fin
+          printf '%s\n' "$DE_KEY" > ~/.ssh/id_de
+          chmod 600 ~/.ssh/id_fin ~/.ssh/id_de
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+          printf '%s\n' "$DE_KNOWN" >> ~/.ssh/known_hosts
+          echo '=== dump on fin ==='
+          ssh -i ~/.ssh/id_fin -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+              -o ConnectTimeout=30 "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          docker exec php-bot-db pg_dump -U phpbot php_bot | gzip > /tmp/dump.sql.gz
+          cp /tmp/dump.sql.gz /srv/php-bot/dump.sql.gz
+          tar czf /tmp/fin.tgz -C /srv/php-bot .env wallpapers dump.sql.gz
+          rm -f /srv/php-bot/dump.sql.gz /tmp/dump.sql.gz
+          du -sh /tmp/fin.tgz
+          REMOTE
+          echo '=== transfer ==='
+          ssh -i ~/.ssh/id_fin -o IdentitiesOnly=yes "$DEPLOY_USER@$DEPLOY_HOST" 'cat /tmp/fin.tgz' > /tmp/fin.tgz
+          du -sh /tmp/fin.tgz
+          echo '=== unpack on DE ==='
+          ssh -i ~/.ssh/id_de -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+              root@78.17.56.245 'tar xzf - -C /srv/php-bot && chown -R phpbot:phpbot /srv/php-bot && ls -la /srv/php-bot | head -12 && du -sh /srv/php-bot' < /tmp/fin.tgz
+          echo '=== cleanup ==='
+          ssh -i ~/.ssh/id_fin -o IdentitiesOnly=yes "$DEPLOY_USER@$DEPLOY_HOST" 'rm -f /tmp/fin.tgz'
+          rm -f /tmp/fin.tgz ~/.ssh/id_fin ~/.ssh/id_de
