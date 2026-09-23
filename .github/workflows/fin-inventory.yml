@@ -21,7 +21,7 @@ jobs:
           printf '%s\n' "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
           ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
               -o ConnectTimeout=30 "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
-          set -euo pipefail
+          set -uo pipefail
           echo '=== /srv ==='; ls -la /srv/ 2>/dev/null
           for d in /srv/*/; do echo "--- $d"; du -sh "$d" 2>/dev/null; ls "$d" | head -8; done
           echo '=== docker volumes ==='; docker volume ls -q | head -10
