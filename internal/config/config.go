@@ -48,10 +48,11 @@ type Config struct {
 	AnniversaryEnabled  bool
 	QuizCheckCron       string
 	QuizEnabled         bool
+	OnCallDays          []time.Weekday
+	OnCallEnabled       bool
+	OnCallTickCron      string
 	NewsCron            string
 	NewsEnabled         bool
-	FakeNewsEnabled     bool
-	WallpapersDir       string
 }
 
 // Load читает env. Необходимые переменные — фаталят при отсутствии.
@@ -92,13 +93,19 @@ func Load() (*Config, error) {
 		AnniversaryEnabled:  envBool("PHPBOT_ANNIVERSARY_ENABLED", true),
 		QuizCheckCron:       envOr("PHPBOT_QUIZ_CHECK_CRON", "*/15 * * * *"),
 		QuizEnabled:         envBool("PHPBOT_QUIZ_ENABLED", true),
+		OnCallEnabled:       envBool("PHPBOT_ONCALL_ENABLED", true),
+		OnCallTickCron:      envOr("PHPBOT_ONCALL_TICK_CRON", "*/2 * * * *"),
 		NewsCron:            envOr("PHPBOT_NEWS_CRON", "0 20 * * *"),
 		NewsEnabled:         envBool("PHPBOT_NEWS_ENABLED", true),
-		FakeNewsEnabled:     envBool("PHPBOT_FAKE_NEWS_ENABLED", true),
-		WallpapersDir:       envOr("PHPBOT_WALLPAPERS_DIR", ""),
 	}
 	c.AdminIDs = envInt64List("PHPBOT_ADMIN_IDS")
 	c.ChatIDs = envInt64List("PHPBOT_CHAT_ID")
+
+	onCall, err := envWeekdays("PHPBOT_ONCALL_DAYS", "wed,fri")
+	if err != nil {
+		return nil, fmt.Errorf("PHPBOT_ONCALL_DAYS: %w", err)
+	}
+	c.OnCallDays = onCall
 
 	if c.SpamFloodMsgs < 1 {
 		c.SpamFloodMsgs = 1
@@ -194,4 +201,34 @@ func envBool(key string, def bool) bool {
 		}
 	}
 	return def
+}
+
+var weekdayNames = map[string]time.Weekday{
+	"mon": time.Monday,
+	"tue": time.Tuesday,
+	"wed": time.Wednesday,
+	"thu": time.Thursday,
+	"fri": time.Friday,
+	"sat": time.Saturday,
+	"sun": time.Sunday,
+}
+
+func envWeekdays(key, def string) ([]time.Weekday, error) {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		v = def
+	}
+	if v == "none" {
+		return nil, nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]time.Weekday, 0, len(parts))
+	for _, p := range parts {
+		d, ok := weekdayNames[strings.TrimSpace(p)]
+		if !ok {
+			return nil, fmt.Errorf("неизвестный день %q (формат mon,tue,wed,thu,fri,sat,sun или none)", p)
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }

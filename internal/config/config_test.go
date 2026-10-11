@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"slices"
+	"testing"
+	"time"
+)
 
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
@@ -56,6 +60,46 @@ func TestClampSpamEscalation(t *testing.T) {
 			}
 			if cfg.SpamNewbieMsgs != c.newbieMsgs {
 				t.Errorf("SpamNewbieMsgs = %d, want %d", cfg.SpamNewbieMsgs, c.newbieMsgs)
+			}
+		})
+	}
+}
+
+// TestOnCallDays — парсинг PHPBOT_ONCALL_DAYS: 3-буквенные англ. дни через запятую,
+// "none"/пусто → дежурство выключено, мусор → ошибка Load.
+func TestOnCallDays(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		want []time.Weekday
+		fail bool
+	}{
+		{"default", "", []time.Weekday{time.Wednesday, time.Friday}, false},
+		{"explicit", "mon,sat", []time.Weekday{time.Monday, time.Saturday}, false},
+		{"single day", "thu", []time.Weekday{time.Thursday}, false},
+		{"case insensitive", "WED", []time.Weekday{time.Wednesday}, false},
+		{"spaces around", " mon , fri ", []time.Weekday{time.Monday, time.Friday}, false},
+		{"none disables", "none", nil, false},
+		{"unknown token", "xyz", nil, true},
+		{"russian not supported", "ср", nil, true},
+		{"none with extra", "none,mon", nil, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			setRequiredEnv(t)
+			t.Setenv("PHPBOT_ONCALL_DAYS", c.env)
+			cfg, err := Load()
+			if c.fail {
+				if err == nil {
+					t.Fatalf("Load() expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			if !slices.Equal(cfg.OnCallDays, c.want) {
+				t.Errorf("OnCallDays = %v, want %v", cfg.OnCallDays, c.want)
 			}
 		})
 	}

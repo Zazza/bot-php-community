@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -30,80 +29,96 @@ var ErrNoNews = errors.New("no fresh news")
 // не захватывая «совсем старые».
 const freshWindow = 48 * time.Hour
 
-// freshCutoff — граница свежести с учётом пропущенных реальных слотов. Пятничный слот
-// занимает фейк-выпуск: отбора реальных новостей нет, и без расширения окна статья,
-// не отобранная LLM в четверг, молча истекает по 48ч в субботу (инцидент 2026-08-22:
-// freek.dev/3182, опубликована чт 16:48, отсечена сб 20:00 границей чт 20:00 — на
-// один отбор была всего одна попытка). За каждый пятничный день внутри вычитаемого
-// периода окно удлиняется на сутки. Инвариант: при 48ч в окне максимум одна пятница —
-// однопроходный скан корректен; при freshWindow ≥ ~5 дней начал бы недосчитывать.
-func freshCutoff(now time.Time, fakeEnabled bool) time.Time {
-	cutoff := now.Add(-freshWindow)
-	if !fakeEnabled {
-		return cutoff
-	}
-	for d := cutoff; d.Before(now); d = d.AddDate(0, 0, 1) {
-		if isFridaySlot(d) {
-			cutoff = cutoff.AddDate(0, 0, -1)
+// freshCutoffMaxPasses — предохранитель фикспойнт-итерации freshCutoff: окно не
+// растёт бесконечно даже при вырожденном конфиге (все 7 дней — дежурство).
+const freshCutoffMaxPasses = 10
+
+// isOnCallSlot — слот ежедневного cron-прогона приходится на день дежурства: в такие
+// дни обычный дайджест не постится. Пустой days → всегда false (дежурств нет —
+// дайджест все дни).
+func isOnCallSlot(t time.Time, days []time.Weekday) bool {
+	for _, d := range days {
+		if t.Weekday() == d {
+			return true
 		}
 	}
+	return false
+}
+
+// freshCutoff — граница свежести с учётом пропущенных слотов дежурства. В день
+// дежурства обычный дайджест не постится: отбора реальных новостей нет, и без
+// расширения окна статья, не отобранная LLM накануне, молча истекает по 48ч
+// (инцидент 2026-08-22: freek.dev/3182, опубликована чт 16:48, отсечена сб 20:00
+// границей чт 20:00 — на один отбор была всего одна попытка). За каждый день
+// дежурства внутри вычитаемого периода окно удлиняется на сутки.
+//
+// Инвариант фикспойнта: cutoff = now − freshWindow − 24ч·(дни дежурства в [cutoff, now)).
+// Однопроходный скан не пересматривал день перед сдвинутой границей и при двух днях
+// дежурства в окне (ср+пт, сб-прогон) давал 72ч вместо 96ч. Итерации сходятся: сдвиг
+// границы влево может только добавить дни дежурства в окно, но не убрать. Предохранитель
+// freshCutoffMaxPasses страхует от вырожденного конфига «все дни — дежурство», где
+// фикспойнта нет (окно растёт неограниченно).
+func freshCutoff(now time.Time, onCallDays []time.Weekday) time.Time {
+	cutoff := now.Add(-freshWindow)
+	for pass := 0; pass < freshCutoffMaxPasses; pass++ {
+		next := now.Add(-freshWindow)
+		for d := cutoff; d.Before(now); d = d.AddDate(0, 0, 1) {
+			if isOnCallSlot(d, onCallDays) {
+				next = next.AddDate(0, 0, -1)
+			}
+		}
+		if next.Equal(cutoff) {
+			return cutoff
+		}
+		cutoff = next
+	}
+	slog.Warn("fresh cutoff: pass limit reached", "passes", freshCutoffMaxPasses, "now", now)
 	return cutoff
 }
 
-// digestTitle — заголовок поста дайджеста. Общий для обычного и пятничного выпусков;
-// пятничный добавляет под ним строку-подпись (fakeDisclaimer), заголовок тот же.
+// digestTitle — заголовок поста дайджеста.
 const digestTitle = "📰 **PHP-дайджест**"
 
-// packagesSectionHeader — литерал заголовка секции пакетов: assembleDigest собирает его
-// сам, пятничный выпуск — из ответа LLM (санитайзер сохраняет блок, равный литералу).
+// packagesSectionHeader — литерал заголовка секции пакетов (assembleDigest собирает его сам).
 const packagesSectionHeader = "📦 **Новые пакеты**"
 
 // Digester собирает PHP-дайджест: фетч фидов → дедуп → LLM-куратория → пост.
 type Digester struct {
-	mu            sync.Mutex // сериализует postWallpapers: cron-пятница и ручной /news fake могут совпасть
-	sources       []Source
-	llm           *llm.LLMClient
-	llmFake       *llm.LLMClient // умная с творческой температурой (temp≈0.9): пятничный фейк-выпуск
-	repo          *Repository
-	api           Poster
-	media         MediaPoster // обои (альбом+документы); nil → постинг обоев выключен
-	chatIDs       []int64
-	cron          *cron.Cron
-	fakeEnabled   bool
-	wallpapersDir string
+	sources    []Source
+	llm        *llm.LLMClient
+	repo       *Repository
+	api        Poster
+	chatIDs    []int64
+	onCallDays []time.Weekday
+	cron       *cron.Cron
 }
 
-// NewDigester создаёт Digester. sources=nil → DefaultSources. llmFake — умная модель
-// с творческой температурой для пятничного фейк-выпуска; fakeEnabled — рубрика вместо
-// обычного дайджеста по пятницам; media/wallpapersDir — «Пятничные обои» после
-// фейк-выпуска (пустой dir → выключены).
-func NewDigester(llm, llmFake *llm.LLMClient, repo *Repository, api Poster, media MediaPoster, chatIDs []int64, sources []Source, fakeEnabled bool, wallpapersDir string) *Digester {
+// NewDigester создаёт Digester. sources=nil → DefaultSources. onCallDays — дни
+// дежурства: обычный дайджест в них не постится, окно свежести расширяется
+// (freshCutoff); пусто → дежурств нет, дайджест все дни.
+func NewDigester(llm *llm.LLMClient, repo *Repository, api Poster, chatIDs []int64, sources []Source, onCallDays []time.Weekday) *Digester {
 	if len(sources) == 0 {
 		sources = DefaultSources()
 	}
-	return &Digester{sources: sources, llm: llm, llmFake: llmFake, repo: repo, api: api, media: media, chatIDs: chatIDs, fakeEnabled: fakeEnabled, wallpapersDir: wallpapersDir}
+	return &Digester{sources: sources, llm: llm, repo: repo, api: api, chatIDs: chatIDs, onCallDays: onCallDays}
 }
 
-// Start регистрирует пост дайджеста (по умолчанию ежедневно 19:00) и запускает cron.
+// Start регистрирует пост дайджеста (по умолчанию ежедневно 20:00; в дни дежурства
+// из onCallDays обычный дайджест молчит) и запускает cron.
 func (d *Digester) Start(ctx context.Context, spec string) error {
 	c := cron.New()
 	_, err := c.AddFunc(spec, func() {
-		// 6 минут: дайджест + обои укладываются в бюджет. Пятница worst-case =
-		// фейк-вызов (90s) + обои (свой ctx 4 мин) либо fallback на обычный пост
-		// (фетч фидов + два LLM-вызова секций по 90s) — 240s не покрывали.
-		bg, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+		// 4 минуты: два LLM-вызова секций по 90s (180s) + запас на фетч фидов и
+		// постинг. Пятничного worst-case (фейк-вызов + обои либо fallback на
+		// обычный пост) больше нет.
+		bg, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cancel()
 		for _, chatID := range d.chatIDs {
-			var err error
-			if d.fakeEnabled && isFridaySlot(time.Now()) {
-				if ferr := d.PostFake(bg, chatID); ferr != nil {
-					slog.Warn("fake news failed, fallback to regular", "chat_id", chatID, "err", ferr)
-					err = d.Post(bg, chatID)
-				}
-			} else {
-				err = d.Post(bg, chatID)
+			if isOnCallSlot(time.Now(), d.onCallDays) {
+				slog.Debug("news digest skipped: on-call day", "chat_id", chatID)
+				continue
 			}
-			if err != nil {
+			if err := d.Post(bg, chatID); err != nil {
 				if errors.Is(err, ErrNoNews) {
 					slog.Debug("news digest skipped", "chat_id", chatID, "err", err)
 				} else {
@@ -118,9 +133,6 @@ func (d *Digester) Start(ctx context.Context, spec string) error {
 	c.Start()
 	d.cron = c
 	slog.Info("news scheduler started", "cron", spec, "sources", len(d.sources))
-	if d.wallpapersDir != "" {
-		slog.Info("friday wallpapers enabled", "dir", d.wallpapersDir)
-	}
 	return nil
 }
 
@@ -135,7 +147,7 @@ func (d *Digester) Stop() {
 // LLM-секциями, pre-release версии отбрасываются.
 func (d *Digester) Post(ctx context.Context, chatID int64) error {
 	items := Fetch(ctx, d.sources)
-	fresh := filterFresh(items, freshCutoff(time.Now(), d.fakeEnabled))
+	fresh := filterFresh(items, freshCutoff(time.Now(), d.onCallDays))
 	posted, err := d.repo.PostedHashes(ctx, chatID)
 	if err != nil {
 		return err

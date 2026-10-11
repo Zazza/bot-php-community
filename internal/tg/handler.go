@@ -18,6 +18,7 @@ import (
 	"phpbot/internal/messages"
 	"phpbot/internal/moderation"
 	"phpbot/internal/news"
+	"phpbot/internal/oncall"
 	"phpbot/internal/quiz"
 	"phpbot/internal/topics"
 	"phpbot/internal/users"
@@ -60,6 +61,7 @@ type Handlers struct {
 	quiz       *quiz.Quiz
 	news       *news.Digester
 	announce   *announce.Service
+	oncall     *oncall.Service
 }
 
 // HandlersDeps — зависимости для сборки Handlers.
@@ -81,6 +83,7 @@ type HandlersDeps struct {
 	Quiz       *quiz.Quiz
 	News       *news.Digester
 	Announce   *announce.Service
+	OnCall     *oncall.Service
 }
 
 // NewHandlers собирает Handlers.
@@ -102,6 +105,7 @@ func NewHandlers(d HandlersDeps) *Handlers {
 		quiz:       d.Quiz,
 		news:       d.News,
 		announce:   d.Announce,
+		oncall:     d.OnCall,
 		chatIDs:    make(map[int64]struct{}, len(d.ChatIDs)),
 	}
 	for _, id := range d.ChatIDs {
@@ -277,6 +281,16 @@ func (h *Handlers) OnCallbackQuery(ctx context.Context, b *bot.Bot, upd *models.
 		})
 		return
 	}
+	if strings.HasPrefix(cb.Data, "oncall:") && h.oncall != nil {
+		text, showAlert := h.oncall.HandleCallback(ctx, cb)
+		if text == "" {
+			text = "—"
+		}
+		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+			CallbackQueryID: cb.ID, Text: text, ShowAlert: showAlert,
+		})
+		return
+	}
 	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
 		CallbackQueryID: cb.ID, Text: "—",
 	})
@@ -314,6 +328,8 @@ func (h *Handlers) dispatchCommand(ctx context.Context, replyChatID, dataChatID 
 		h.cmdQuiz(ctx, replyChatID, dataChatID, msg)
 	case "news":
 		h.cmdNews(ctx, replyChatID, dataChatID, msg)
+	case "oncall":
+		h.cmdOncall(ctx, replyChatID, dataChatID, msg, args)
 	case "announce":
 		h.cmdAnnounce(ctx, replyChatID, msg)
 	case "cancel":
@@ -345,6 +361,7 @@ func (h *Handlers) cmdHelp(ctx context.Context, replyChatID int64) {
 /kick @user — кик пользователя
 /quiz — запостить вопрос викторины
 /news — PHP-новости недели (релизы/пакеты/обсуждения)
+/oncall [cancel] — запустить симулятор инцидента «Дежурство» (или отменить смену)
 /announce (в личке боту) — анонс митапа со сбором спикеров
 
 *Для всех:*
@@ -434,7 +451,6 @@ func (h *Handlers) cmdQuiz(ctx context.Context, replyChatID, dataChatID int64, m
 // cmdNews — админский запуск PHP-дайджеста. Постит туда, где вызван: в группе → в группу,
 // в ЛС → приватный превью админу (дедуп news_posted привязан к chat_id, поэтому превью в ЛС
 // не «съедает» недельные новости группы). dataChatID не используется (новости — внешний контент).
-// args="fake" — ручной запуск пятничного выпуска (без fallback на обычный дайджест).
 func (h *Handlers) cmdNews(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message) {
 	if msg.From == nil || !h.moderation.IsAdmin(msg.From.ID) {
 		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
@@ -442,21 +458,6 @@ func (h *Handlers) cmdNews(ctx context.Context, replyChatID, dataChatID int64, m
 	}
 	if h.news == nil {
 		_ = SendMessage(ctx, h.api, replyChatID, "PHP-новости выключены.")
-		return
-	}
-	_, args := extractCommand(msg.Text)
-	// Первый токен регистронезависимо: "/news FAKE", "/news Fake погнали" — тоже рубрика.
-	if fs := strings.Fields(args); len(fs) > 0 && strings.EqualFold(fs[0], "fake") {
-		_ = SendMessage(ctx, h.api, replyChatID, "🎰 Собираю пятничный выпуск...")
-		go func() {
-			// 2 минуты: LLM HTTP-таймаут 90s + запас на постинг (replyTimeout впритык).
-			ctxBg, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-			if err := h.news.PostFake(ctxBg, replyChatID); err != nil {
-				slog.Error("fake news post", "err", err)
-				_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось собрать пятничный выпуск: "+err.Error())
-			}
-		}()
 		return
 	}
 	_ = SendMessage(ctx, h.api, replyChatID, "⏳ Собираю PHP-новости недели...")
@@ -470,6 +471,43 @@ func (h *Handlers) cmdNews(ctx context.Context, replyChatID, dataChatID int64, m
 				slog.Error("news post", "err", err)
 				_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось собрать новости: "+err.Error())
 			}
+		}
+	}()
+}
+
+// cmdOncall — админский запуск рубрики «Дежурство» в групповом чате (dataChatID);
+// /oncall cancel — отмена активной смены.
+func (h *Handlers) cmdOncall(ctx context.Context, replyChatID, dataChatID int64, msg *models.Message, args string) {
+	if msg.From == nil || !h.moderation.IsAdmin(msg.From.ID) {
+		_ = SendMessage(ctx, h.api, replyChatID, "Команда только для админов.")
+		return
+	}
+	if h.oncall == nil {
+		_ = SendMessage(ctx, h.api, replyChatID, "Рубрика выключена (PHPBOT_ONCALL_ENABLED).")
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(args), "cancel") {
+		if err := h.oncall.Cancel(ctx, dataChatID); err != nil {
+			if errors.Is(err, oncall.ErrNoSession) {
+				_ = SendMessage(ctx, h.api, replyChatID, "Нет активной смены.")
+				return
+			}
+			slog.Error("oncall cancel", "err", err)
+			_ = SendMessage(ctx, h.api, replyChatID, "Не удалось отменить смену.")
+		}
+		return
+	}
+	_ = SendMessage(ctx, h.api, replyChatID, "🚨 Дежурство запускается…")
+	go func() {
+		ctxBg, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if err := h.oncall.StartSession(ctxBg, dataChatID); err != nil {
+			slog.Error("oncall start", "err", err)
+			if errors.Is(err, oncall.ErrActiveSession) {
+				_ = SendMessage(ctxBg, h.api, replyChatID, err.Error())
+				return
+			}
+			_ = SendMessage(ctxBg, h.api, replyChatID, "Не удалось запустить дежурство, попробуй позже.")
 		}
 	}()
 }

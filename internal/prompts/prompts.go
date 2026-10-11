@@ -42,6 +42,10 @@ const (
 	Quiz       = "quiz.txt"
 	News       = "news.txt"
 	Packages   = "packages.txt"
-	FakeNews   = "fake-news.txt"
 	Anniv      = "anniv.txt"
+
+	OncallScenario   = "oncall-scenario.txt"
+	OncallPlans      = "oncall-plans.txt"
+	OncallOutcome    = "oncall-outcome.txt"
+	OncallPostmortem = "oncall-postmortem.txt"
 )

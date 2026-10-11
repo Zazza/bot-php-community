@@ -111,29 +111,15 @@ func (r *Repository) RecentKeys(ctx context.Context, chatID int64, days int) ([]
 	return rows, nil
 }
 
-// PostedToday — сколько викторин уже постилось в чате сегодня (по дате сервера БД).
-func (r *Repository) PostedToday(ctx context.Context, chatID int64) (int, error) {
+// PostedSince — сколько викторин постилось в чате с момента since (для «одно на окно»).
+func (r *Repository) PostedSince(ctx context.Context, chatID int64, since time.Time) (int, error) {
 	var n int
 	if err := r.db.GetContext(ctx, &n, `
-		SELECT count(*) FROM quizzes
-		WHERE chat_id = $1 AND created_at >= date_trunc('day', now())
-	`, chatID); err != nil {
-		return 0, fmt.Errorf("posted today: %w", err)
+		SELECT count(*) FROM quizzes WHERE chat_id = $1 AND created_at >= $2
+	`, chatID, since); err != nil {
+		return 0, fmt.Errorf("posted since: %w", err)
 	}
 	return n, nil
-}
-
-// LastPostAt — время последнего квиза в чате; ok=false, если квизов ещё не было.
-func (r *Repository) LastPostAt(ctx context.Context, chatID int64) (time.Time, bool, error) {
-	var nt sql.NullTime
-	if err := r.db.GetContext(ctx, &nt,
-		`SELECT MAX(created_at) FROM quizzes WHERE chat_id = $1`, chatID); err != nil {
-		return time.Time{}, false, fmt.Errorf("last post at: %w", err)
-	}
-	if !nt.Valid {
-		return time.Time{}, false, nil
-	}
-	return nt.Time, true, nil
 }
 
 // RecordBallot учитывает ответ участника. Возвращает new=true, если голос новый

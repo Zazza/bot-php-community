@@ -29,7 +29,8 @@ func TestGetAskChat(t *testing.T) {
 // TestSafetyFirstLine — SAFETY-блок обязателен первой строкой (CLAUDE.md),
 // правки промпта не должны сдвигать его вниз.
 func TestSafetyFirstLine(t *testing.T) {
-	for _, name := range []string{Chat, Ask, Digest, DigestPast, FakeNews, Spam} {
+	for _, name := range []string{Chat, Ask, Digest, DigestPast, Spam, Quiz,
+		OncallScenario, OncallPlans, OncallOutcome, OncallPostmortem} {
 		t.Run(name, func(t *testing.T) {
 			if idx := strings.Index(Get(name), "SAFETY:"); idx != 0 {
 				t.Errorf("%s: индекс \"SAFETY:\" = %d, want 0 (SAFETY-блок не первой строкой)", name, idx)
@@ -74,50 +75,6 @@ func TestAskSkipPolicy(t *testing.T) {
 		if strings.Contains(p, bad) {
 			t.Errorf("ask.txt: инструкция молчания из chat.txt: %q", bad)
 		}
-	}
-}
-
-// TestFakeNewsPromptContract — промпт пятничного выпуска как source of truth формата
-// «неотличим от обычного дайджеста»: заголовок секции пакетов дословно как в обычном
-// выпуске, запрет помечать выдуманность (включая мета-комментарии) на месте. Маркеры
-// выдуманности из старой версии («Статьи, которых не было», «Пакеты, которых не
-// существует», «дисклеймер») не должны возвращаться даже как инструкция: упоминать их
-// можно ТОЛЬКО внутри строки запрета.
-func TestFakeNewsPromptContract(t *testing.T) {
-	p := Get(FakeNews)
-
-	var ban string
-	for _, ln := range strings.Split(p, "\n") {
-		if strings.Contains(ln, "не помечай выдуманность") {
-			ban = ln
-			break
-		}
-	}
-	if ban == "" {
-		t.Fatalf("fake-news.txt: исчез запрет помечать выдуманность (якорь «не помечай выдуманность»)")
-	}
-	if !strings.Contains(ban, "мета-комментари") {
-		t.Errorf("fake-news.txt: запрет не покрывает мета-комментарии: %q", ban)
-	}
-	if !strings.Contains(p, "📦 **Новые пакеты**") {
-		t.Errorf("fake-news.txt: нет дословного заголовка секции пакетов %q", "📦 **Новые пакеты**")
-	}
-
-	rest := strings.Replace(p, ban, "", 1)
-	cases := []struct {
-		name string
-		bad  string
-	}{
-		{"old_articles_header", "которых не было"},
-		{"old_packages_header", "которых не существует"},
-		{"disclaimer_instruction", "дисклеймер"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if strings.Contains(rest, c.bad) {
-				t.Errorf("fake-news.txt: маркер выдуманности %q вне строки запрета — выпуск снова пометится", c.bad)
-			}
-		})
 	}
 }
 

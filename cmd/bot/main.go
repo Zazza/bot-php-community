@@ -23,6 +23,7 @@ import (
 	"phpbot/internal/messages"
 	"phpbot/internal/moderation"
 	"phpbot/internal/news"
+	"phpbot/internal/oncall"
 	"phpbot/internal/prompts"
 	"phpbot/internal/quiz"
 	"phpbot/internal/tg"
@@ -65,7 +66,7 @@ func main() {
 	defer dbx.Close()
 
 	llmClient := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModel, 2048, 0)     // умная: ответы /ask + модерация-судья + анти-спам (temp=0: детерминированно)
-	llmCreative := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModel, 2048, 0.9) // умная+творческая temp=0.9: пятничный фейк-выпуск, генерация вопросов викторины
+	llmCreative := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModel, 2048, 0.9) // умная+творческая temp=0.9: генерация вопросов викторины
 	llmCheap := llm.NewLLMClient(cfg.LLMURL, cfg.LLMAPIKey, cfg.LLMModelCheap, 2048, 0) // дешёвая: faq/digest/темы
 	embedder := llm.NewEmbedder(cfg.LLMURL, cfg.LLMAPIKey, cfg.EmbedModel)
 
@@ -137,15 +138,34 @@ func main() {
 
 	digester := topics.NewDigester(dbx, llmCheap, msgRepo, poster, cfg.ChatIDs)
 
+	// Дни дежурства влияют на расписание квизов/дайджеста ТОЛЬКО при включённой
+	// рубрике: выключенный PHPBOT_ONCALL_ENABLED возвращает их к обычному режиму.
+	oncallDays := cfg.OnCallDays
+	if !cfg.OnCallEnabled {
+		oncallDays = nil
+	}
+
 	quizRepo := quiz.NewRepository(dbx)
 	quizSvc := quiz.New(b, llmCreative, llmClient, quizRepo, cfg.ChatIDs)
-	quizSched := quiz.NewScheduler(quizSvc, msgRepo, quizRepo)
+	quizSched := quiz.NewScheduler(quizSvc, msgRepo, quizRepo, oncallDays)
 	annivSched := anniv.New(msgRepo, llmClient, poster, cfg.ChatIDs)
 
 	newsRepo := news.NewRepository(dbx)
-	newsDigester := news.NewDigester(llmCheap, llmCreative, newsRepo, poster, poster, cfg.ChatIDs, news.DefaultSources(), cfg.FakeNewsEnabled, cfg.WallpapersDir)
+	newsDigester := news.NewDigester(llmCheap, newsRepo, poster, cfg.ChatIDs, news.DefaultSources(), oncallDays)
 
 	announceSvc := announce.New(b, cfg.AdminIDs, cfg.ChatIDs[0])
+
+	// Рубрика «Дежурство» целиком (сервис/движок/шедулер) — только при включённом
+	// PHPBOT_ONCALL_ENABLED; при выключенном h.oncall == nil → /oncall отвечает
+	// «Рубрика выключена».
+	var oncallSvc *oncall.Service
+	var oncallSched *oncall.Scheduler
+	if cfg.OnCallEnabled {
+		oncallRepo := oncall.NewRepository(dbx)
+		oncallSvc = oncall.New(b, llmCreative, llmClient, oncallRepo, msgRepo, cfg.ChatIDs)
+		oncallEng := oncall.NewEngine(oncallSvc, oncallRepo, msgRepo, cfg.OnCallDays)
+		oncallSched = oncall.NewScheduler(oncallEng)
+	}
 
 	handlers := tg.NewHandlers(tg.HandlersDeps{
 		API: b, ChatIDs: cfg.ChatIDs, BotUserID: me.ID,
@@ -153,7 +173,7 @@ func main() {
 		Users: userRepo, Msgs: msgRepo, Vec: vecRepo,
 		Answerer: answerer, Digester: digester,
 		FAQ: faqRepo, FAQBuilder: faqBuilder, Quiz: quizSvc, News: newsDigester,
-		Announce: announceSvc,
+		Announce: announceSvc, OnCall: oncallSvc,
 	})
 	handlers.SetBotUsername(me.Username)
 
@@ -177,6 +197,12 @@ func main() {
 			slog.Error("news cron start", "err", err)
 		}
 		defer newsDigester.Stop()
+	}
+	if oncallSched != nil {
+		if err := oncallSched.Start(ctx, cfg.OnCallTickCron); err != nil {
+			slog.Error("oncall cron start", "err", err)
+		}
+		defer oncallSched.Stop()
 	}
 	if cfg.AnniversaryEnabled {
 		if err := annivSched.Start(ctx, cfg.AnniversaryCron); err != nil {

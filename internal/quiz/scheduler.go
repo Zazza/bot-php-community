@@ -10,28 +10,28 @@ import (
 	"phpbot/internal/messages"
 )
 
-// Параметры тишина-триггера викторины.
+type window struct {
+	start int
+	end   int
+}
+
+func (w window) String() string {
+	return fmt.Sprintf("%02d:00-%02d:00", w.start, w.end)
+}
+
+var defaultWindows = []window{{10, 13}, {15, 17}}
+
 type schedCfg struct {
-	silence      time.Duration // тишина чата, достаточная для поста
-	minInterval  time.Duration // мин. интервал между квизами
-	dailyCap     int           // максимум квизов в день на чат
-	windowStart  int           // час начала окна постинга (включительно)
-	windowEnd    int           // час конца окна (эксклюзивно)
-	fallbackFrom int           // с этого часа — fallback-пост, если за день ещё не постили
+	silence    time.Duration
+	windows    []window
+	onCallDays []time.Weekday
 }
 
 var defaultSchedCfg = schedCfg{
-	silence:      2 * time.Hour,
-	minInterval:  4 * time.Hour,
-	dailyCap:     2,
-	windowStart:  10,
-	windowEnd:    22,
-	fallbackFrom: 21,
+	silence: 2 * time.Hour,
+	windows: defaultWindows,
 }
 
-// Scheduler постит викторину в моменты тишины чата (заменяет фиксированное время и роль
-// убранных «тем для разговора»): до dailyCap квизов в день, с мин. интервалом, в окне
-// windowStart–windowEnd; если за день не постили — fallback ближе к вечеру.
 type Scheduler struct {
 	q    *Quiz
 	msgs *messages.Repository
@@ -40,12 +40,33 @@ type Scheduler struct {
 	cron *cron.Cron
 }
 
-// NewScheduler создаёт scheduler тишина-триггера.
-func NewScheduler(q *Quiz, msgs *messages.Repository, repo *Repository) *Scheduler {
-	return &Scheduler{q: q, msgs: msgs, repo: repo, cfg: defaultSchedCfg}
+func NewScheduler(q *Quiz, msgs *messages.Repository, repo *Repository, onCallDays []time.Weekday) *Scheduler {
+	cfg := defaultSchedCfg
+	cfg.onCallDays = onCallDays
+	return &Scheduler{q: q, msgs: msgs, repo: repo, cfg: cfg}
 }
 
-// Start запускает чекер по spec (период проверки, обычно каждые 15 минут).
+func windowsFor(day time.Weekday, cfg schedCfg) []window {
+	if len(cfg.windows) == 0 {
+		return cfg.windows
+	}
+	for _, d := range cfg.onCallDays {
+		if d == day {
+			return cfg.windows[:1]
+		}
+	}
+	return cfg.windows
+}
+
+func windowFor(hour int, ws []window) (window, bool) {
+	for _, w := range ws {
+		if hour >= w.start && hour < w.end {
+			return w, true
+		}
+	}
+	return window{}, false
+}
+
 func (s *Scheduler) Start(ctx context.Context, spec string) error {
 	c := cron.New()
 	_, err := c.AddFunc(spec, func() {
@@ -58,12 +79,15 @@ func (s *Scheduler) Start(ctx context.Context, spec string) error {
 	}
 	c.Start()
 	s.cron = c
+	days := make([]string, 0, len(s.cfg.onCallDays))
+	for _, d := range s.cfg.onCallDays {
+		days = append(days, d.String())
+	}
 	slog.Info("quiz scheduler started", "cron", spec, "silence", s.cfg.silence,
-		"min_interval", s.cfg.minInterval, "cap", s.cfg.dailyCap)
+		"windows", s.cfg.windows, "oncall_days", days)
 	return nil
 }
 
-// tick проверяет все чаты и постит викторину там, где выполнены условия.
 func (s *Scheduler) tick(ctx context.Context) {
 	now := time.Now()
 	for _, chatID := range s.q.chatIDs {
@@ -73,45 +97,37 @@ func (s *Scheduler) tick(ctx context.Context) {
 	}
 }
 
-// maybePost постит викторину в чат, если решит shouldPost; иначе ничего не делает.
 func (s *Scheduler) maybePost(ctx context.Context, chatID int64, now time.Time) error {
-	posted, err := s.repo.PostedToday(ctx, chatID)
-	if err != nil {
-		return err
+	w, ok := windowFor(now.Hour(), windowsFor(now.Weekday(), s.cfg))
+	if !ok {
+		return nil
 	}
-	lastPost, hasPost, err := s.repo.LastPostAt(ctx, chatID)
+	windowStart := time.Date(now.Year(), now.Month(), now.Day(), w.start, 0, 0, 0, now.Location())
+	posted, err := s.repo.PostedSince(ctx, chatID, windowStart)
 	if err != nil {
-		return err
+		return fmt.Errorf("posted since window start: %w", err)
 	}
 	recent, err := s.msgs.CountSince(ctx, chatID, now.Add(-s.cfg.silence))
 	if err != nil {
-		return err
+		return fmt.Errorf("count recent: %w", err)
 	}
-	if !shouldPost(now, lastPost, hasPost, posted, recent == 0, s.cfg) {
+	if !shouldPost(now, posted, recent == 0, s.cfg) {
 		return nil
 	}
 	return s.q.Post(ctx, chatID)
 }
 
-// shouldPost — чистая функция решения, постить ли квиз сейчас. now — текущее время,
-// lastPost/hasPost — последний квиз в чате, postedToday — сколько уже постили сегодня,
-// silent — тих ли чат (нет сообщений за cfg.silence).
-func shouldPost(now, lastPost time.Time, hasPost bool, postedToday int, silent bool, cfg schedCfg) bool {
-	if postedToday >= cfg.dailyCap {
+// shouldPost — чистая функция решения, постить ли квиз сейчас: только в разрешённом
+// окне дня, если в этом окне ещё не постили и чат тих (тишина-триггер: живая беседа
+// важнее квиза, гарантийного поста нет).
+func shouldPost(now time.Time, postedInWindow int, silent bool, cfg schedCfg) bool {
+	_, ok := windowFor(now.Hour(), windowsFor(now.Weekday(), cfg))
+	if !ok {
 		return false
 	}
-	hour := now.Hour()
-	if hour < cfg.windowStart || hour >= cfg.windowEnd {
-		return false
-	}
-	if hasPost && now.Sub(lastPost) < cfg.minInterval {
-		return false
-	}
-	fallback := postedToday == 0 && hour >= cfg.fallbackFrom
-	return silent || fallback
+	return postedInWindow == 0 && silent
 }
 
-// Stop останавливает cron.
 func (s *Scheduler) Stop() {
 	if s.cron != nil {
 		s.cron.Stop()

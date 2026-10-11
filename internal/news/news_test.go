@@ -86,35 +86,103 @@ func TestFilterFresh(t *testing.T) {
 	}
 }
 
-// TestFreshCutoff — пятничный фейк-слот не отбирал новости: окно свежести удлиняется
-// на сутки за каждую пятницу внутри периода, чтобы не отобранная в четверг статья не
-// истекала молча в субботу. Без фейка и в будничных прогонах — прежние 48ч.
-func TestFreshCutoff(t *testing.T) {
-	fri := time.Date(2026, 8, 21, 20, 0, 0, 0, time.UTC)
+// TestIsOnCallSlot — день дежурства: t.Weekday() входит в days. Пустой days →
+// всегда false (дежурств нет — дайджест постится все дни).
+func TestIsOnCallSlot(t *testing.T) {
+	onCall := []time.Weekday{time.Wednesday, time.Friday}
 	cases := []struct {
 		name string
-		now  time.Time
-		fake bool
-		want time.Time
+		t    time.Time
+		days []time.Weekday
+		want bool
 	}{
-		{"суббота после фейк-пятницы: 72ч", fri.AddDate(0, 0, 1), true, fri.AddDate(0, 0, 1).Add(-72 * time.Hour)},
-		{"суббота, фейк выключен: 48ч", fri.AddDate(0, 0, 1), false, fri.AddDate(0, 0, 1).Add(-48 * time.Hour)},
-		{"сам пятничный слот: без расширения", fri, true, fri.Add(-48 * time.Hour)},
-		{"воскресенье: пятница на границе окна тоже удлиняет", fri.AddDate(0, 0, 2), true, fri.AddDate(0, 0, 2).Add(-72 * time.Hour)},
-		{"понедельник: пятниц в окне нет", fri.AddDate(0, 0, 3), true, fri.AddDate(0, 0, 3).Add(-48 * time.Hour)},
+		{"среда — дежурство", time.Date(2026, 8, 19, 20, 0, 0, 0, time.UTC), onCall, true},
+		{"пятница — дежурство", time.Date(2026, 8, 21, 20, 0, 0, 0, time.UTC), onCall, true},
+		{"четверг — обычный день", time.Date(2026, 8, 20, 20, 0, 0, 0, time.UTC), onCall, false},
+		{"пустые дни: пятница не дежурство", time.Date(2026, 8, 21, 20, 0, 0, 0, time.UTC), nil, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := freshCutoff(c.now, c.fake); !got.Equal(c.want) {
-				t.Errorf("freshCutoff(%s, fake=%v) = %s, want %s", c.now.Format("Mon 02.01 15:04"), c.fake, got, c.want)
+			if got := isOnCallSlot(c.t, c.days); got != c.want {
+				t.Errorf("isOnCallSlot(%s, %v) = %v, want %v", c.t.Format("Mon 02.01"), c.days, got, c.want)
 			}
 		})
 	}
 }
 
+// TestFreshCutoff — день дежурства не отбирал новости: окно свежести удлиняется
+// на сутки за каждый день дежурства внутри периода (итерацией до фикспойнта —
+// день перед сдвинутой границей пересматривается). Без дежурств и в прогонах без
+// дней дежурства в окне — прежние 48ч.
+func TestFreshCutoff(t *testing.T) {
+	onCall := []time.Weekday{time.Wednesday, time.Friday}
+	fri := time.Date(2026, 8, 21, 20, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		now  time.Time
+		days []time.Weekday
+		want time.Time
+	}{
+		{"суббота после дежурных ср+пт: 96ч (день перед сдвигом пересмотрен)", fri.AddDate(0, 0, 1), onCall, fri.AddDate(0, 0, 1).Add(-96 * time.Hour)},
+		{"суббота, дежурств нет: 48ч", fri.AddDate(0, 0, 1), nil, fri.AddDate(0, 0, 1).Add(-48 * time.Hour)},
+		{"суббота, пустой список дней: без продления", fri.AddDate(0, 0, 1), []time.Weekday{}, fri.AddDate(0, 0, 1).Add(-48 * time.Hour)},
+		{"четверг после дежурной среды: 72ч", fri.AddDate(0, 0, -1), onCall, fri.AddDate(0, 0, -1).Add(-72 * time.Hour)},
+		{"сам день дежурства: ср внутри окна удлиняет, пт (конец) не считается", fri, onCall, fri.Add(-72 * time.Hour)},
+		{"воскресенье: пятница на границе окна тоже удлиняет", fri.AddDate(0, 0, 2), onCall, fri.AddDate(0, 0, 2).Add(-72 * time.Hour)},
+		{"понедельник: дней дежурства в окне нет", fri.AddDate(0, 0, 3), onCall, fri.AddDate(0, 0, 3).Add(-48 * time.Hour)},
+		{"смежные дежурства пн+вт, чт-прогон: 96ч", fri.AddDate(0, 0, -1), []time.Weekday{time.Monday, time.Tuesday}, fri.AddDate(0, 0, -1).Add(-96 * time.Hour)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := freshCutoff(c.now, c.days); !got.Equal(c.want) {
+				t.Errorf("freshCutoff(%s, %v) = %s, want %s", c.now.Format("Mon 02.01 15:04"), c.days, got, c.want)
+			}
+		})
+	}
+}
+
+// TestFreshCutoffSaturdayRescue — статья, опубликованная вт 20:00 (ровно граница
+// 96ч-окна), жива в субботнем прогоне при ср+пт: пересмотр дня перед сдвинутым
+// cutoff'ом — то, что чинил фикспойнт.
+func TestFreshCutoffSaturdayRescue(t *testing.T) {
+	sat := time.Date(2026, 8, 22, 20, 0, 0, 0, time.UTC)
+	tue := sat.Add(-96 * time.Hour)
+	items := []Item{{
+		Source:    Source{Name: "s", URL: "u", Category: "blog"},
+		Title:     "статья вторника",
+		Link:      "https://x.com/tue",
+		Published: tue,
+	}}
+	if got := filterFresh(items, freshCutoff(sat, []time.Weekday{time.Wednesday, time.Friday})); len(got) != 1 {
+		t.Fatalf("статья вт 20:00 отсечена 96ч-окном субботнего прогона: осталось %d, want 1", len(got))
+	}
+}
+
+// TestFreshCutoffGuard — предохранитель итераций: при вырожденном конфиге «все дни
+// дежурства» фикспойнта нет (окно растёт каждую итерацию), функция обязана
+// остановиться на freshCutoffMaxPasses и не зависнуть. Обычные конфиги сходятся
+// задолго до предохранителя (TestFreshCutoff).
+func TestFreshCutoffGuard(t *testing.T) {
+	now := time.Date(2026, 8, 22, 20, 0, 0, 0, time.UTC)
+	all := []time.Weekday{time.Monday, time.Tuesday, time.Wednesday, time.Thursday, time.Friday, time.Saturday, time.Sunday}
+	done := make(chan time.Time, 1)
+	go func() { done <- freshCutoff(now, all) }()
+	select {
+	case got := <-done:
+		// 10 проходов: каждый pass n добавляет в окно 2n дней дежурства → итог
+		// now − 48ч − 20 суток. Точное значение стабильно и документирует потолок.
+		want := now.Add(-freshWindow).AddDate(0, 0, -20)
+		if !got.Equal(want) {
+			t.Errorf("freshCutoff(все дни) = %s, want %s (потолок предохранителя)", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("freshCutoff завис при вырожденном конфиге — предохранитель не работает")
+	}
+}
+
 // TestFreshCutoffRescuesThursdayPost — регрессия инцидента 2026-08-22: статья
 // freek.dev/3182 (опубликована чт 16:48 МСК = 13:48 UTC) обязана быть кандидатом
-// субботнего прогона, если пятницу занял фейк-выпуск.
+// субботнего прогона, если пятница была днём дежурства.
 func TestFreshCutoffRescuesThursdayPost(t *testing.T) {
 	sat := time.Date(2026, 8, 22, 20, 0, 0, 0, time.UTC)
 	items := []Item{{
@@ -123,7 +191,7 @@ func TestFreshCutoffRescuesThursdayPost(t *testing.T) {
 		Link:      "https://freek.dev/3182-modular-monoliths-creating-real-boundaries-before-reaching-for-microservices",
 		Published: time.Date(2026, 8, 20, 13, 48, 25, 0, time.UTC),
 	}}
-	if got := filterFresh(items, freshCutoff(sat, true)); len(got) != 1 {
+	if got := filterFresh(items, freshCutoff(sat, []time.Weekday{time.Wednesday, time.Friday})); len(got) != 1 {
 		t.Fatalf("фильтр выкинул статью freek: осталось %d, want 1", len(got))
 	}
 	if got := filterFresh(items, sat.Add(-freshWindow)); len(got) != 0 {
