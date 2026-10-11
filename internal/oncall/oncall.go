@@ -182,12 +182,16 @@ func (s *Service) Cancel(ctx context.Context, chatID int64) error {
 // недоступен навсегда — вечный resume-ретрай тика не нужен). Успех → привязка id
 // сообщения к фазе и сброс счётчика.
 func (s *Service) sendHTML(ctx context.Context, sessID, chatID int64, text string, kb *models.InlineKeyboardMarkup) error {
-	sent, err := s.api.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: chatID, Text: md.ToHTML(text), ParseMode: models.ParseModeHTML, ReplyMarkup: kb,
-	})
+	html := &bot.SendMessageParams{ChatID: chatID, Text: md.ToHTML(text), ParseMode: models.ParseModeHTML}
+	plain := &bot.SendMessageParams{ChatID: chatID, Text: text}
+	if kb != nil { // typed-nil указатель в interface-поле = не-nil интерфейс → reply_markup:null → 400
+		html.ReplyMarkup = kb
+		plain.ReplyMarkup = kb
+	}
+	sent, err := s.api.SendMessage(ctx, html)
 	if err != nil {
 		slog.Warn("oncall send html failed, retry plain", "err", err, "chat_id", chatID)
-		sent, err = s.api.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: text, ReplyMarkup: kb})
+		sent, err = s.api.SendMessage(ctx, plain)
 	}
 	if err != nil {
 		n, cerr := s.repo.PostFailed(ctx, sessID)
