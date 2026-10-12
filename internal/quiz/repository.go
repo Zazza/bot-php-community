@@ -1,4 +1,4 @@
-// Package quiz — ежедневная викторина про чат и его участников.
+// Package quiz — ежедневная викторина: вопросы на инженерное суждение (архитектура, чистый код, ООП, паттерны).
 package quiz
 
 import (
@@ -13,7 +13,7 @@ import (
 
 // Question — сгенерированный вопрос (до записи в БД).
 type Question struct {
-	Kind        string   // категория темы (напр. «type-juggling», «psr»)
+	Kind        string   // категория-архетип (напр. «solid», «patterns», «clean-code», «arch»)
 	Prompt      string   // текст вопроса
 	Opts        []string // варианты (обычно 4)
 	Correct     int      // индекс верной опции в Opts

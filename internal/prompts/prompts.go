@@ -40,6 +40,7 @@ const (
 	Search     = "search.txt"
 	Me         = "me.txt"
 	Quiz       = "quiz.txt"
+	QuizVerify = "quiz-verify.txt"
 	News       = "news.txt"
 	Packages   = "packages.txt"
 	Anniv      = "anniv.txt"

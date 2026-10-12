@@ -32,9 +32,29 @@ const dedupFallbackDays = 7
 const maxBannedQuestions = 15
 
 // maxQuestionRunes — предел длины текста вопроса в бан-листе генератору.
-const maxQuestionRunes = 120
+const maxQuestionRunes = 300
 
-// Generator собирает знаниевый вопрос через LLM и независимой сверкой защищает верный ответ.
+// Лимиты validQuiz — страховка от разошедшейся LLM (промпт просит 900/60/150,
+// код отсекает только опасное для поста/кнопок TG, стиль не карая).
+const (
+	maxQuestionBodyRunes = 1200
+	maxOptionRunes       = 64
+	maxExplanationRunes  = 160
+)
+
+// allowedCategories — белый список категорий вопроса-суждения (договор с quiz.txt).
+var allowedCategories = map[string]struct{}{
+	"solid":       {},
+	"patterns":    {},
+	"clean-code":  {},
+	"refactoring": {},
+	"arch":        {},
+	"oop":         {},
+	"testability": {},
+}
+
+// Generator собирает вопрос на инженерное суждение через LLM и независимой
+// сверкой защищает верный ответ.
 type Generator struct {
 	gen    *llm.LLMClient
 	verify *llm.LLMClient
@@ -51,8 +71,9 @@ type quizJSON struct {
 	Explanation string   `json:"explanation"`
 }
 
-// Generate: LLM генерит MCQ по знаниям PHP → дедуп по содержанию → независимая self-verify
-// верного ответа. Повтор/не сошлось/LLM не уверен → следующая попытка. Два раунда: сначала
+// Generate: LLM генерит MCQ-вопрос на инженерное суждение → валидация структуры и
+// категории → дедуп по содержанию → независимая self-verify верного ответа.
+// Повтор/не сошлось/LLM не уверен → следующая попытка. Два раунда: сначала
 // окно дедупа dedupDays, при неудаче — ослабленное dedupFallbackDays (текст-дедуп не
 // выключается). Генерация идёт творческим клиентом (temp=0.9), сверка — детерминированным
 // (temp=0). Оба раунда исчерпаны → ошибка (cron пропустит день: лучше молчание, чем повтор).
@@ -65,11 +86,10 @@ func (g *Generator) Generate(ctx context.Context, chatID int64) (*Question, erro
 	now := time.Now()
 	for _, days := range []int{dedupDays, dedupFallbackDays} {
 		since := now.AddDate(0, 0, -days)
-		seenText, seenCats := buildSeenKeys(recent, since)
-		avoid := categoryList(seenCats)
+		seenText := buildSeenKeys(recent, since)
 		banned := buildRecentQuestions(recentSince(recent, since), maxBannedQuestions)
 		for attempt := 0; attempt < maxAttempts; attempt++ {
-			raw, err := g.genOne(ctx, avoid, banned)
+			raw, err := g.genOne(ctx, banned)
 			if err != nil || raw == nil || raw.Skip || !validQuiz(raw) {
 				continue
 			}
@@ -92,18 +112,20 @@ func (g *Generator) Generate(ctx context.Context, chatID int64) (*Question, erro
 	return nil, errGenFailed
 }
 
-// genOne просит LLM сгенерировать один MCQ, избегая недавних категорий и текстов вопросов.
-func (g *Generator) genOne(ctx context.Context, avoid, banned []string) (*quizJSON, error) {
-	user := "Сгенерируй один вопрос для викторины по знаниям PHP/веб."
-	if len(avoid) > 0 {
-		user += " Уже были темы — не повторяй их: " + strings.Join(avoid, ", ") + "."
+// genOne просит LLM сгенерировать один вопрос-суждение; недавние тексты вопросов
+// (бан-лист с категорией-префиксом) идут в user-сообщении — промпт статичен.
+func (g *Generator) genOne(ctx context.Context, banned []string) (*quizJSON, error) {
+	sys := prompts.Get(prompts.Quiz)
+	if sys == "" {
+		return nil, errors.New("quiz prompt missing in embed")
 	}
+	user := "Сгенерируй один вопрос на инженерное суждение для викторины PHP-сообщества."
 	if len(banned) > 0 {
 		user += "\n\nЭти вопросы уже задавались (не повторяй их и похожие по смыслу):\n— " +
 			strings.Join(banned, "\n— ")
 	}
 	resp, _, _, err := g.gen.Chat(ctx, []llm.Message{
-		{Role: "system", Content: prompts.Get(prompts.Quiz)},
+		{Role: "system", Content: sys},
 		{Role: "user", Content: user},
 	})
 	if err != nil {
@@ -120,6 +142,10 @@ func (g *Generator) genOne(ctx context.Context, avoid, banned []string) (*quizJS
 // Вернёт true, только если второй вызов однозначно указывает на тот же индекс;
 // -1 (неоднозначно/некорректно) → отбраковка.
 func (g *Generator) verifyAnswer(ctx context.Context, q *quizJSON) (bool, error) {
+	sys := prompts.Get(prompts.QuizVerify)
+	if sys == "" {
+		return false, errors.New("quiz verify prompt missing in embed")
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Вопрос: %s\nВарианты:\n", strings.TrimSpace(q.Question))
 	letters := "ABCD"
@@ -130,9 +156,7 @@ func (g *Generator) verifyAnswer(ctx context.Context, q *quizJSON) (bool, error)
 		fmt.Fprintf(&b, "%c) %s\n", letters[i], strings.TrimSpace(o))
 	}
 	resp, _, _, err := g.verify.Chat(ctx, []llm.Message{
-		{Role: "system", Content: "Ты PHP-эксперт. Для вопроса викторины верни ОДНУ цифру — " +
-			"индекс верного варианта (0-3). Если верных несколько, ни одного или вопрос " +
-			"допускает трактовки — верни -1. Только цифра, без текста."},
+		{Role: "system", Content: sys},
 		{Role: "user", Content: b.String()},
 	})
 	if err != nil {
@@ -142,19 +166,28 @@ func (g *Generator) verifyAnswer(ctx context.Context, q *quizJSON) (bool, error)
 	return idx >= 0 && idx == q.Correct, nil
 }
 
-// validQuiz проверяет структуру: ровно 4 непустых варианта, корректный индекс в диапазоне,
-// непустой вопрос.
+// validQuiz проверяет структуру: непустой вопрос в пределах лимита, категория из
+// белого списка (без учёта регистра), ровно 4 непустых варианта, корректный индекс.
 func validQuiz(q *quizJSON) bool {
 	if q == nil || strings.TrimSpace(q.Question) == "" {
+		return false
+	}
+	if len([]rune(q.Question)) > maxQuestionBodyRunes {
+		return false
+	}
+	if _, ok := allowedCategories[strings.ToLower(strings.TrimSpace(q.Category))]; !ok {
 		return false
 	}
 	if len(q.Options) != 4 {
 		return false
 	}
 	for _, o := range q.Options {
-		if strings.TrimSpace(o) == "" {
+		if strings.TrimSpace(o) == "" || len([]rune(o)) > maxOptionRunes {
 			return false
 		}
+	}
+	if len([]rune(strings.TrimSpace(q.Explanation))) > maxExplanationRunes {
+		return false
 	}
 	if q.Correct < 0 || q.Correct > 3 {
 		return false
@@ -189,29 +222,17 @@ func trimOpts(opts []string) []string {
 	return out
 }
 
-func categoryList(m map[string]struct{}) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
-}
-
-// buildSeenKeys собирает множества нормализованных текстов и категорий вопросов окна since
+// buildSeenKeys собирает множество нормализованных текстов вопросов окна since
 // для дедупа по содержанию.
-func buildSeenKeys(recent []RecentKey, since time.Time) (text, cats map[string]struct{}) {
-	text = make(map[string]struct{}, len(recent))
-	cats = make(map[string]struct{}, len(recent))
+func buildSeenKeys(recent []RecentKey, since time.Time) map[string]struct{} {
+	text := make(map[string]struct{}, len(recent))
 	for _, k := range recent {
 		if k.CreatedAt.Before(since) {
 			continue
 		}
 		text[normalizeKey(k.Question)] = struct{}{}
-		if c := normalizeKey(k.Category); c != "" {
-			cats[c] = struct{}{}
-		}
 	}
-	return text, cats
+	return text
 }
 
 // recentSince — вопросы из recent, заданные не раньше since (окно раунда дедупа).
@@ -225,8 +246,9 @@ func recentSince(recent []RecentKey, since time.Time) []RecentKey {
 	return out
 }
 
-// buildRecentQuestions — тексты недавних вопросов для бан-листа генератору: recent уже
-// отсортирован DESC (свежие первыми), каждый обрезан до maxQuestionRunes рун.
+// buildRecentQuestions — строки бан-листа генератору: «category: текст вопроса»
+// (префикс категории, чтобы одна категория не маскировала другую); recent уже
+// отсортирован DESC (свежие первыми), текст обрезан до maxQuestionRunes рун.
 func buildRecentQuestions(recent []RecentKey, max int) []string {
 	out := make([]string, 0, max)
 	for _, k := range recent {
@@ -237,7 +259,11 @@ func buildRecentQuestions(recent []RecentKey, max int) []string {
 		if q == "" {
 			continue
 		}
-		out = append(out, truncateRunes(q, maxQuestionRunes))
+		q = truncateRunes(q, maxQuestionRunes)
+		if c := strings.TrimSpace(k.Category); c != "" {
+			q = c + ": " + q
+		}
+		out = append(out, q)
 	}
 	return out
 }

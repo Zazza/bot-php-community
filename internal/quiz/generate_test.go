@@ -69,14 +69,21 @@ func TestValidQuiz(t *testing.T) {
 		q    *quizJSON
 		want bool
 	}{
-		{"valid", &quizJSON{Question: "Q", Options: opts4, Correct: 2}, true},
-		{"skip", &quizJSON{Skip: true, Question: "Q", Options: opts4, Correct: 0}, true}, // skip не валидирует структуру
+		{"valid", &quizJSON{Category: "solid", Question: "Q", Options: opts4, Correct: 2}, true},
+		{"valid category trimmed", &quizJSON{Category: " clean-code ", Question: "Q", Options: opts4, Correct: 0}, true},
+		{"valid category case insensitive", &quizJSON{Category: "Solid", Question: "Q", Options: opts4, Correct: 0}, true},
+		{"foreign category", &quizJSON{Category: "type-juggling", Question: "Q", Options: opts4, Correct: 0}, false},
+		{"empty category", &quizJSON{Question: "Q", Options: opts4, Correct: 0}, false},
+		{"skip", &quizJSON{Skip: true, Category: "solid", Question: "Q", Options: opts4, Correct: 0}, true}, // skip не валидирует структуру
 		{"nil", nil, false},
-		{"empty question", &quizJSON{Options: opts4, Correct: 0}, false},
-		{"three opts", &quizJSON{Question: "Q", Options: []string{"a", "b", "c"}, Correct: 0}, false},
-		{"empty opt", &quizJSON{Question: "Q", Options: []string{"a", "b", "c", "  "}, Correct: 0}, false},
-		{"correct out of range", &quizJSON{Question: "Q", Options: opts4, Correct: 4}, false},
-		{"correct negative", &quizJSON{Question: "Q", Options: opts4, Correct: -1}, false},
+		{"empty question", &quizJSON{Category: "solid", Options: opts4, Correct: 0}, false},
+		{"question over limit", &quizJSON{Category: "solid", Question: strings.Repeat("в", maxQuestionBodyRunes+1), Options: opts4, Correct: 0}, false},
+		{"option over limit", &quizJSON{Category: "solid", Question: "Q", Options: []string{"a", "b", "c", strings.Repeat("о", maxOptionRunes+1)}, Correct: 0}, false},
+		{"explanation over limit", &quizJSON{Category: "solid", Question: "Q", Options: opts4, Correct: 0, Explanation: strings.Repeat("э", maxExplanationRunes+1)}, false},
+		{"three opts", &quizJSON{Category: "solid", Question: "Q", Options: []string{"a", "b", "c"}, Correct: 0}, false},
+		{"empty opt", &quizJSON{Category: "solid", Question: "Q", Options: []string{"a", "b", "c", "  "}, Correct: 0}, false},
+		{"correct out of range", &quizJSON{Category: "solid", Question: "Q", Options: opts4, Correct: 4}, false},
+		{"correct negative", &quizJSON{Category: "solid", Question: "Q", Options: opts4, Correct: -1}, false},
 	}
 	for _, c := range cases {
 		if got := validQuiz(c.q); got != c.want {
@@ -100,7 +107,7 @@ func TestBuildSeenKeysDedup(t *testing.T) {
 		{Category: "Type-Juggling", Question: "Что выведет: echo '1' + '1a'; ?"},
 		{Category: "psr", Question: "Какой PSR описывает автозагрузчик?"},
 	}
-	text, cats := buildSeenKeys(recent, time.Time{})
+	text := buildSeenKeys(recent, time.Time{})
 
 	// перефразированный/другорегистровый тот же вопрос — повтор
 	if _, dup := text[normalizeKey("что выведет echo '1' + '1a';?")]; !dup {
@@ -109,10 +116,6 @@ func TestBuildSeenKeysDedup(t *testing.T) {
 	// совсем другой вопрос — не повтор
 	if _, dup := text[normalizeKey("Какой PSR описывает логер?")]; dup {
 		t.Error("different question falsely flagged as duplicate")
-	}
-	// категория тоже нормализована
-	if _, ok := cats["type juggling"]; !ok {
-		t.Errorf("category not normalized: %v", cats)
 	}
 }
 
@@ -139,31 +142,20 @@ func TestBuildSeenKeysWindow(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			text, cats := buildSeenKeys(recent, now.AddDate(0, 0, -c.days))
+			text := buildSeenKeys(recent, now.AddDate(0, 0, -c.days))
 			keys := []struct {
 				label string
-				cat   string
 				q     string
 				want  bool
 			}{
-				{"age_10d_in_30d_out_7d", "десятидневная", "десять дней назад", c.want10},
-				{"age_2d_in_both", "свежая", "два дня назад", c.want2},
-				{"age_40d_in_neither", "сорокадневная", "сорок дней назад", c.want40},
+				{"age_10d_in_30d_out_7d", "десять дней назад", c.want10},
+				{"age_2d_in_both", "два дня назад", c.want2},
+				{"age_40d_in_neither", "сорок дней назад", c.want40},
 			}
 			for _, k := range keys {
-				inText := false
-				if _, ok := text[normalizeKey(k.q)]; ok {
-					inText = true
-				}
+				_, inText := text[normalizeKey(k.q)]
 				if inText != k.want {
 					t.Errorf("%s: вопрос %q в text-seen=%v, want %v (окно %d д)", k.label, k.q, inText, k.want, c.days)
-				}
-				inCats := false
-				if _, ok := cats[normalizeKey(k.cat)]; ok {
-					inCats = true
-				}
-				if inCats != k.want {
-					t.Errorf("%s: категория %q в cats-seen=%v, want %v (окно %d д)", k.label, k.cat, inCats, k.want, c.days)
 				}
 			}
 		})
@@ -187,10 +179,11 @@ func TestRecentSince(t *testing.T) {
 	}
 }
 
-// TestBuildRecentQuestions — бан-лист текстов вопросов для генератора: не больше max
-// строк, остаются первые по порядку слайса (RecentKeys отдаёт DESC — свежие первыми,
-// т.е. хвост из старых отбрасывается), текст длиннее maxQuestionRunes рун обрезан
-// и помечен «…», короткие тексты и пустой вход не искажаются.
+// TestBuildRecentQuestions — бан-лист для генератора: строка «category: текст вопроса»
+// (префикс категории — одна категория не маскирует другую; без категории — просто текст),
+// не больше max строк, остаются первые по порядку слайса (RecentKeys отдаёт DESC — свежие
+// первыми, т.е. хвост из старых отбрасывается), текст вопроса длиннее maxQuestionRunes рун
+// обрезан и помечен «…», короткие тексты и пустой вход не искажаются.
 func TestBuildRecentQuestions(t *testing.T) {
 	long := strings.Repeat("в", maxQuestionRunes+50)
 	wantLong := strings.Repeat("в", maxQuestionRunes) + "…"
@@ -210,9 +203,11 @@ func TestBuildRecentQuestions(t *testing.T) {
 		want   []string
 	}{
 		{"empty", nil, []string{}},
-		{"short_untouched", []RecentKey{{Question: "Что выведет var_dump(0 == 'a')?"}}, []string{"Что выведет var_dump(0 == 'a')?"}},
-		{"whitespace_only_skipped", []RecentKey{{Question: "   "}, {Question: "реальный вопрос"}}, []string{"реальный вопрос"}},
+		{"short_untouched", []RecentKey{{Question: "Что ГЛАВНОЕ не так в этом коде?"}}, []string{"Что ГЛАВНОЕ не так в этом коде?"}},
+		{"category_prefixed", []RecentKey{{Category: "solid", Question: "Что ГЛАВНОЕ не так?"}}, []string{"solid: Что ГЛАВНОЕ не так?"}},
+		{"whitespace_only_skipped", []RecentKey{{Category: "solid", Question: "   "}, {Question: "реальный вопрос"}}, []string{"реальный вопрос"}},
 		{"long_truncated", []RecentKey{{Question: long}}, []string{wantLong}},
+		{"long_truncated_with_category", []RecentKey{{Category: "clean-code", Question: long}}, []string{"clean-code: " + wantLong}},
 		{"capped_at_max", tooMany, wantCapped},
 	}
 	for _, c := range cases {
@@ -224,9 +219,16 @@ func TestBuildRecentQuestions(t *testing.T) {
 			if !reflect.DeepEqual(got, c.want) {
 				t.Errorf("case %s:\ngot  %v\nwant %v", c.name, got, c.want)
 			}
+			// вопрос-часть строки (после префикса «category: ») укладывается в лимит
 			for _, q := range got {
-				if n := utf8.RuneCountInString(q); n > maxQuestionRunes+1 {
-					t.Errorf("case %s: строка длиннее лимита: %d рун > %d+1 («…»)", c.name, n, maxQuestionRunes)
+				body := q
+				if i := strings.Index(q, ": "); i > 0 {
+					if _, ok := allowedCategories[strings.ToLower(q[:i])]; ok {
+						body = q[i+2:]
+					}
+				}
+				if n := utf8.RuneCountInString(body); n > maxQuestionRunes+1 {
+					t.Errorf("case %s: вопрос длиннее лимита: %d рун > %d+1 («…»)", c.name, n, maxQuestionRunes)
 				}
 			}
 		})
