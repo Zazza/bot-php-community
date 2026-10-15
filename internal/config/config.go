@@ -101,7 +101,7 @@ func Load() (*Config, error) {
 	c.AdminIDs = envInt64List("PHPBOT_ADMIN_IDS")
 	c.ChatIDs = envInt64List("PHPBOT_CHAT_ID")
 
-	onCall, err := envWeekdays("PHPBOT_ONCALL_DAYS", "wed,fri")
+	onCall, err := envWeekdays("PHPBOT_ONCALL_DAYS", "none")
 	if err != nil {
 		return nil, fmt.Errorf("PHPBOT_ONCALL_DAYS: %w", err)
 	}

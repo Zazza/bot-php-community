@@ -74,7 +74,7 @@ func TestOnCallDays(t *testing.T) {
 		want []time.Weekday
 		fail bool
 	}{
-		{"default", "", []time.Weekday{time.Wednesday, time.Friday}, false},
+		{"default", "", nil, false},
 		{"explicit", "mon,sat", []time.Weekday{time.Monday, time.Saturday}, false},
 		{"single day", "thu", []time.Weekday{time.Thursday}, false},
 		{"case insensitive", "WED", []time.Weekday{time.Wednesday}, false},

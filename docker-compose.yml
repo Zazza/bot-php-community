@@ -76,6 +76,11 @@ services:
       PHPBOT_QUIET_THRESHOLD: ${PHPBOT_QUIET_THRESHOLD:-20}
       PHPBOT_TOPIC_CRON: ${PHPBOT_TOPIC_CRON:-0 12,20 * * *}
       PHPBOT_NEWCOMER_TIMEOUT: ${PHPBOT_NEWCOMER_TIMEOUT:-5m}
+      # Дежурство: пауза после 2026-10-14 (спамил в чат); включить обратно —
+      # PHPBOT_ONCALL_DAYS=wed,fri в .env на сервере
+      PHPBOT_ONCALL_ENABLED: ${PHPBOT_ONCALL_ENABLED:-true}
+      PHPBOT_ONCALL_DAYS: ${PHPBOT_ONCALL_DAYS:-none}
+      PHPBOT_ONCALL_TICK_CRON: ${PHPBOT_ONCALL_TICK_CRON:-*/2 * * * *}
       # Логи
       TZ: ${TZ:-Europe/Moscow}
       PHPBOT_LOG_PATH: /app/logs/bot.log
